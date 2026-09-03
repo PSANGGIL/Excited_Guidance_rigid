@@ -1,0 +1,6 @@
+numpy>=1.26
+PyYAML>=6.0
+torch>=2.2
+# Optional, only needed for SDF export and RDKit sanitization:
+# rdkit>=2023.9
+

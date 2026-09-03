@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyring-diffusion"
+version = "0.1.0"
+description = "Hierarchical ring/atom diffusion prototype for polycyclic molecule generation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "torch>=2.2",
+]
+
+[project.optional-dependencies]
+chem = ["rdkit>=2023.9"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+polyring-train = "polyring_diffusion.train:main"
+polyring-sample = "polyring_diffusion.sample:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+

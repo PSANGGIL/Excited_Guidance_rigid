@@ -1,0 +1,39 @@
+seed: 7
+device: cpu
+
+data:
+  num_samples: 64
+  min_rings: 2
+  max_rings: 5
+  peri_probability: 0.20
+  templates: [benzene, pyridine, pyrazine, pyrrole, furan, thiophene, borinine]
+
+diffusion:
+  timesteps: 12
+  beta_start: 0.0001
+  beta_end: 0.02
+
+model:
+  hidden_dim: 48
+  num_layers: 2
+  time_dim: 32
+  max_ports: 8
+
+training:
+  batch_size: 8
+  epochs: 1
+  learning_rate: 0.0002
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  center_weight: 1.0
+  normal_weight: 0.25
+  ring_type_weight: 1.0
+  connection_weight: 1.0
+  port_weight: 0.5
+  checkpoint: runs/smoke.pt
+
+sampling:
+  num_rings: 4
+  num_samples: 4
+  max_extra_fusions: 1
+  output: samples/smoke.jsonl
