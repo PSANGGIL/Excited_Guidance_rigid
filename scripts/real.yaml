@@ -1,0 +1,36 @@
+seed: 42
+device: cuda:0
+data:
+  root: data_ring_rigid
+
+diffusion:
+  timesteps: 200
+  beta_start: 0.0001
+  beta_end: 0.02
+
+model:
+  hidden_dim: 192
+  num_layers: 6
+  time_dim: 64
+  max_ports: 8
+  condition_dim: 1
+  condition_dropout: 0.1
+
+training:
+  batch_size: 8192
+  num_workers: 0
+  epochs: 50
+  learning_rate: 0.0002
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  bf16: true
+  connection_class_weights: [0.05, 1.0, 1.0, 1.0]
+  loss_weights:
+    center: 1.0
+    normal: 0.25
+    ring: 1.0
+    connection: 1.0
+    port: 0.5
+  validation_batches: 0
+  early_stopping_patience: 15
+  output_dir: runs/rigid_100k
