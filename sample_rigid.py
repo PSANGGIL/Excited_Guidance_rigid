@@ -21,18 +21,21 @@ def compatible(sig1,p1,sig2,p2,kind):
         return (a==bn and an==b) or (a==b and an==bn)
     return True
 
-def project(type_ids,conn_logits,port_logits,templates,max_extra=0,noise_scale=0.0,rng=None):
-    n=len(type_ids); candidates=[]; cl=F.log_softmax(conn_logits,-1); pl=F.log_softmax(port_logits,-1)
-    sigs=[templates[i]['signature'] for i in type_ids]
-    for i in range(n):
-      for j in range(i+1,n):
+def build_candidates(type_ids,conn_logits,port_logits,templates):
+    base=[];cl=F.log_softmax(conn_logits,-1).detach().cpu();pl=F.log_softmax(port_logits,-1).detach().cpu();sigs=[templates[i]['signature'] for i in type_ids]
+    for i in range(len(type_ids)):
+      for j in range(i+1,len(type_ids)):
        for kind in (1,2,3):
         for lp in range(len(sigs[i])):
          for rp in range(len(sigs[j])):
           if compatible(sigs[i],lp,sigs[j],rp,kind):
-           score=float(cl[i,j,kind]+pl[i,j,lp]+pl[j,i,rp]);rank=score
-           if noise_scale and rng is not None:rank+=noise_scale*(-math.log(-math.log(max(rng.random(),1e-12))))
-           candidates.append((rank,score,i,j,kind,lp,rp))
+           score=float(cl[i,j,kind]+pl[i,j,lp]+pl[j,i,rp]);base.append((score,i,j,kind,lp,rp))
+    return base
+
+def project(type_ids,conn_logits,port_logits,templates,max_extra=0,noise_scale=0.0,rng=None,cached_candidates=None):
+    n=len(type_ids);sigs=[templates[i]['signature'] for i in type_ids]
+    base=cached_candidates if cached_candidates is not None else build_candidates(type_ids,conn_logits,port_logits,templates)
+    candidates=[(score+(noise_scale*(-math.log(-math.log(max(rng.random(),1e-12)))) if noise_scale and rng is not None else 0.0),score,i,j,kind,lp,rp) for score,i,j,kind,lp,rp in base]
     candidates.sort(reverse=True); parent=list(range(n)); used_atoms=set(); pairs=set(); selected=[]
     def find(x):
       while parent[x]!=x: parent[x]=parent[parent[x]]; x=parent[x]
@@ -79,11 +82,14 @@ def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connectio
       for b in range(n_samples):
         ids=rt[b].tolist();rings=[{'template_id':tid,'signature':templates[tid]['signature'],'center':centers[b,i].tolist(),'normal':normals[b,i].tolist()} for i,tid in enumerate(ids)]
         rng=random.Random(seed+int(round(target*1000003))+b*10007);best=None;tested=0;valid_count=0
+        cached=build_candidates(ids,pred['connection_logits'][b],pred['port_logits'][b],templates)
         if connection_attempts>1:
+          from rdkit import RDLogger
           from export_rigid_sdf import decode
+          RDLogger.DisableLog('rdApp.*')
         for attempt in range(max(1,connection_attempts)):
           noise=0.0 if attempt==0 else connection_noise
-          edges,connected=project(ids,pred['connection_logits'][b],pred['port_logits'][b],templates,noise_scale=noise,rng=rng)
+          edges,connected=project(ids,pred['connection_logits'][b],pred['port_logits'][b],templates,noise_scale=noise,rng=rng,cached_candidates=cached)
           rec={'target_f_osc':target,'normalized_condition':normalized,'connected':connected,'rings':rings,'connections':edges}
           score=sum(e['score'] for e in edges);is_valid=False
           if connection_attempts>1 and connected:
