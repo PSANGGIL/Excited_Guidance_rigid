@@ -14,7 +14,7 @@ class DSU:
   a,b=self.find(a),self.find(b)
   if a!=b:self.p[b]=a
 
-def decode(record,seed):
+def decode(record,seed,embed=True):
  rings=record['rings']; offsets=[]; raw=[]
  for ring in rings:
   offsets.append(len(raw));raw.extend(ring['signature'])
@@ -48,7 +48,9 @@ def decode(record,seed):
   sig=ring['signature'];n=len(sig)
   for p in range(n):add(offsets[ri]+p,offsets[ri]+((p+1)%n),sig[p][3])
  for a,b,k in singles:add(a,b,k)
- mol=rw.GetMol();Chem.SanitizeMol(mol);mol=Chem.AddHs(mol)
+ mol=rw.GetMol();Chem.SanitizeMol(mol)
+ if not embed:return mol,Chem.MolToSmiles(mol)
+ mol=Chem.AddHs(mol)
  params=AllChem.ETKDGv3();params.randomSeed=int(seed);params.useRandomCoords=True;params.maxIterations=1000
  if AllChem.EmbedMolecule(mol,params)!=0:raise ValueError('ETKDG embedding failed')
  if AllChem.MMFFHasAllMoleculeParams(mol):AllChem.MMFFOptimizeMolecule(mol,maxIters=1000)
