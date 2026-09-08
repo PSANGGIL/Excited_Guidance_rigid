@@ -91,3 +91,17 @@ class ValidityCurriculumSampler(torch.utils.data.Sampler[int]):
             repeats=(len(self.dataset)+count-1)//count
             indices=torch.cat([eligible[torch.randperm(count,generator=g)] for _ in range(repeats)])[:len(self.dataset)]
         return iter(indices.tolist())
+
+
+class PropertyBandSampler(torch.utils.data.Sampler[int]):
+    """Oversample a continuous raw-property band while retaining global coverage."""
+    def __init__(self,dataset:RigidRingDataset,low:float=1.0,high:float=2.0,band_fraction:float=.6,seed:int=42):
+        if not 0<band_fraction<1:raise ValueError('band_fraction must be between zero and one')
+        self.dataset=dataset;self.low=float(low);self.high=float(high);self.band_fraction=float(band_fraction);self.seed=int(seed);self.epoch=0
+        props=torch.cat([x['raw_properties'].float().reshape(-1) for x in dataset.shards]);inside=(props>=self.low)&(props<self.high);self.band=torch.where(inside)[0];self.other=torch.where(~inside)[0]
+        if not len(self.band) or not len(self.other):raise ValueError('property band and complement must both be non-empty')
+    def set_epoch(self,epoch:int):self.epoch=int(epoch)
+    def __len__(self):return len(self.dataset)
+    def __iter__(self):
+        g=torch.Generator().manual_seed(self.seed+self.epoch);n=len(self.dataset);nb=int(round(n*self.band_fraction));no=n-nb
+        a=self.band[torch.randint(len(self.band),(nb,),generator=g)];b=self.other[torch.randint(len(self.other),(no,),generator=g)];both=torch.cat((a,b));return iter(both[torch.randperm(n,generator=g)].tolist())

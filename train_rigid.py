@@ -9,7 +9,7 @@ from polyring_diffusion.chemical_losses import ChemicalConstraintLoss
 from polyring_diffusion.diffusion import LinearNoiseSchedule
 from polyring_diffusion.graph import ConnectionType
 from polyring_diffusion.model import RingDenoiser
-from polyring_diffusion.real_data import RigidRingDataset,ValidityCurriculumSampler,collate_rigid
+from polyring_diffusion.real_data import PropertyBandSampler,RigidRingDataset,ValidityCurriculumSampler,collate_rigid
 
 def masked_mean(x,mask):
  selected=x[mask];return selected.mean() if selected.numel() else x.new_zeros(())
@@ -39,10 +39,13 @@ def main():
  if a.resume:
   state=torch.load(a.resume,map_location=device,weights_only=False);model.load_state_dict(state['model']);opt.load_state_dict(state['optimizer']);scheduler.load_state_dict(state['scheduler']);start_epoch=state['epoch']+1;step=state['step'];print('resumed',a.resume,flush=True)
  tc=cfg['training'].get('curriculum',{});curriculum=ValidityCurriculumSampler(train_ds,tc.get('fractions',[.4,.7,1.]),tc.get('milestones',[0,10,20]),seed) if tc.get('enabled',False) else None
- bs=int(cfg['training']['batch_size']);workers=int(cfg['training'].get('num_workers',0));train_loader=make_loader(train_ds,bs,workers,shuffle=curriculum is None,sampler=curriculum);val_loader=make_loader(val_ds,bs,workers);weights=cfg['training']['loss_weights'];class_weights=torch.tensor(cfg['training']['connection_class_weights'],device=device)
+ pb=cfg['training'].get('property_band',{});band_sampler=PropertyBandSampler(train_ds,pb.get('low',1.),pb.get('high',2.),pb.get('fraction',.6),seed) if pb.get('enabled',False) else None
+ if curriculum is not None and band_sampler is not None:raise ValueError('curriculum and property_band cannot both be enabled')
+ sampler=band_sampler or curriculum
+ bs=int(cfg['training']['batch_size']);workers=int(cfg['training'].get('num_workers',0));train_loader=make_loader(train_ds,bs,workers,shuffle=sampler is None,sampler=sampler);val_loader=make_loader(val_ds,bs,workers);weights=cfg['training']['loss_weights'];class_weights=torch.tensor(cfg['training']['connection_class_weights'],device=device)
  run=Path(cfg['training']['output_dir']);run.mkdir(parents=True,exist_ok=True);(run/'config.resolved.yaml').write_text(yaml.safe_dump(cfg,sort_keys=False));(run/'dataset_summary.json').write_text(json.dumps({'train':len(train_ds),'val':len(val_ds),'templates':model.num_templates,'max_rings':train_ds.max_rings,'property_mean':train_ds.property_mean,'property_std':train_ds.property_std},indent=2));best=math.inf;patience=0;metrics_file=(run/'metrics.jsonl').open('a',buffering=1);use_amp=bool(cfg['training'].get('bf16',True));print({'device':torch.cuda.get_device_name(device),'batch_size':bs,'chemical_constraints':chemical is not None,'curriculum':curriculum is not None,'parameters':sum(p.numel() for p in model.parameters())},flush=True)
  for epoch in range(start_epoch,int(cfg['training']['epochs'])):
-  if curriculum:curriculum.set_epoch(epoch)
+  if sampler:sampler.set_epoch(epoch)
   model.train();sums={'loss':0.};seen=0;started=time.time();torch.cuda.reset_peak_memory_stats(device)
   for raw in train_loader:
    with torch.autocast('cuda',dtype=torch.bfloat16,enabled=use_amp):args=make_batch(raw,model,schedule,device,True);terms=loss_terms(args,class_weights,chemical);loss=total_loss(terms,weights)
@@ -55,7 +58,7 @@ def main():
     val_sums['loss']+=float(value);vb+=1
     for k,v in terms.items():val_sums[k]=val_sums.get(k,0.)+float(v)
     if vb>=int(cfg['training'].get('validation_batches',0) or len(val_loader)):break
-  scheduler.step();val=val_sums['loss']/max(vb,1);metrics={'epoch':epoch,'step':step,'train_loss':sums['loss']/seen,'val_loss':val,'seconds':time.time()-started,'lr':scheduler.get_last_lr()[0],'peak_gpu_gib':torch.cuda.max_memory_allocated(device)/2**30,'curriculum_fraction':curriculum.fraction() if curriculum else 1.0};metrics.update({f'train_{k}':v/seen for k,v in sums.items() if k!='loss'});metrics.update({f'val_{k}':v/max(vb,1) for k,v in val_sums.items() if k!='loss'});print(json.dumps(metrics),flush=True);metrics_file.write(json.dumps(metrics)+'\n');save(run/'last.pt',model,opt,scheduler,epoch,step,cfg,train_ds,metrics)
+  scheduler.step();val=val_sums['loss']/max(vb,1);metrics={'epoch':epoch,'step':step,'train_loss':sums['loss']/seen,'val_loss':val,'seconds':time.time()-started,'lr':scheduler.get_last_lr()[0],'peak_gpu_gib':torch.cuda.max_memory_allocated(device)/2**30,'curriculum_fraction':curriculum.fraction() if curriculum else 1.0,'property_band_fraction':band_sampler.band_fraction if band_sampler else 0.0};metrics.update({f'train_{k}':v/seen for k,v in sums.items() if k!='loss'});metrics.update({f'val_{k}':v/max(vb,1) for k,v in val_sums.items() if k!='loss'});print(json.dumps(metrics),flush=True);metrics_file.write(json.dumps(metrics)+'\n');save(run/'last.pt',model,opt,scheduler,epoch,step,cfg,train_ds,metrics)
   if val<best:best=val;patience=0;save(run/'best.pt',model,opt,scheduler,epoch,step,cfg,train_ds,metrics)
   else:patience+=1
   if patience>=int(cfg['training'].get('early_stopping_patience',20)):print('early stopping',flush=True);break

@@ -6,6 +6,7 @@ from pathlib import Path
 import torch,torch.nn.functional as F
 from polyring_diffusion.diffusion import LinearNoiseSchedule,center_coordinates,normalize_vectors
 from polyring_diffusion.model import RingDenoiser
+from polyring_diffusion.validity_scorer import feature_vector,load_validity_scorer
 
 def reveal(masked,step): return masked & (torch.rand(masked.shape,device=masked.device)<(1.0 if step==0 else 1.0/(step+1)))
 def guided(model,args,condition,scale):
@@ -62,10 +63,10 @@ def project(type_ids,conn_logits,port_logits,templates,max_extra=0,noise_scale=0
     return selected,connected
 
 @torch.no_grad()
-def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connection_attempts=1,connection_noise=0.35):
+def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connection_attempts=1,connection_noise=0.35,validity_dataset=None,validity_scorer=None,validity_weight=2.0):
     torch.manual_seed(seed); device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'); state=torch.load(checkpoint,map_location=device,weights_only=False); cfg=state['config']; features=state['template_features']
     mc=dict(cfg['model']); mc.update(num_templates=features.shape[0],template_features=features.tolist()); model=RingDenoiser(**mc).to(device);model.load_state_dict(state['model']);model.eval(); schedule=LinearNoiseSchedule(**cfg['diffusion']).to(device)
-    templates=sorted(state['manifest']['templates'],key=lambda x:x['id']); records=[]
+    templates=sorted(state['manifest']['templates'],key=lambda x:x['id']);records=[];label_rows=[];scorer_bundle=load_validity_scorer(validity_scorer) if validity_scorer else None
     transform=state['manifest']['splits'][0].get('target_transform','log10') if False else 'log10'; epsilon=1e-6
     for target in targets:
       torch.manual_seed(seed)
@@ -87,6 +88,7 @@ def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connectio
           from rdkit import RDLogger
           from export_rigid_sdf import decode
           RDLogger.DisableLog('rdApp.*')
+        options=[]
         for attempt in range(max(1,connection_attempts)):
           noise=0.0 if attempt==0 else connection_noise
           edges,connected=project(ids,pred['connection_logits'][b],pred['port_logits'][b],templates,noise_scale=noise,rng=rng,cached_candidates=cached)
@@ -96,8 +98,14 @@ def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connectio
            tested+=1
            try:decode(rec,seed,embed=False);is_valid=True;valid_count+=1
            except Exception:pass
-          if best is None or (is_valid and (not best[0] or score>best[1])):best=(is_valid,score,rec,attempt)
-        rec=best[2];rec['connection_search']={'attempts_requested':max(1,connection_attempts),'candidates_tested':tested,'valid_candidates':valid_count,'selected_attempt':best[3],'selected_valid':best[0]}
+          features=feature_vector(rec);options.append([is_valid,score,rec,attempt,features,0.0,score])
+          if validity_dataset is not None:label_rows.append({'features':features,'valid':int(is_valid),'target_f_osc':target,'conditional_score':score,'attempt':attempt})
+        if scorer_bundle:
+          scorer,mean,std,_=scorer_bundle
+          fx=torch.tensor([o[4] for o in options]);probs=scorer((fx-mean)/std).sigmoid().tolist()
+          for o,prob in zip(options,probs):o[5]=prob;o[6]=o[1]+validity_weight*math.log(max(prob,1e-8))
+        valid_options=[o for o in options if o[0]];best=max(valid_options or options,key=lambda o:o[6])
+        rec=best[2];rec['connection_search']={'decoder':'sequential_constrained_tree','attempts_requested':max(1,connection_attempts),'candidates_tested':tested,'valid_candidates':valid_count,'selected_attempt':best[3],'selected_valid':best[0],'conditional_score':best[1],'validity_probability':best[5],'joint_reward':best[6]}
         records.append(rec)
     output.parent.mkdir(parents=True,exist_ok=True)
     with output.open('w') as f:
@@ -109,7 +117,12 @@ def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connectio
        for ring in r['rings']:tf[str(ring['template_id'])]=tf.get(str(ring['template_id']),0)+1
        for e in r['connections']:cf[e['kind']]=cf.get(e['kind'],0)+1
       summary[str(target)]={'samples':len(subset),'connected':sum(r['connected'] for r in subset),'template_counts':tf,'connection_counts':cf}
-    output.with_suffix('.summary.json').write_text(json.dumps(summary,indent=2)); print(json.dumps(summary,indent=2))
+    output.with_suffix('.summary.json').write_text(json.dumps(summary,indent=2))
+    if validity_dataset is not None:
+      validity_dataset.parent.mkdir(parents=True,exist_ok=True)
+      with validity_dataset.open('w') as f:
+       for row in label_rows:f.write(json.dumps(row)+'\n')
+    print(json.dumps(summary,indent=2))
 def main():
- p=argparse.ArgumentParser();p.add_argument('--checkpoint',default='runs/rigid_100k/best.pt');p.add_argument('--targets',type=float,nargs='+',default=[0.1,0.8,3.0]);p.add_argument('--n-samples',type=int,default=32);p.add_argument('--num-rings',type=int,default=13);p.add_argument('--guidance',type=float,default=1.5);p.add_argument('--seed',type=int,default=123);p.add_argument('--connection-attempts',type=int,default=1);p.add_argument('--connection-noise',type=float,default=.35);p.add_argument('--output',type=Path,default=Path('samples/rigid_100k.jsonl'));a=p.parse_args();sample(a.checkpoint,a.targets,a.n_samples,a.num_rings,a.guidance,a.seed,a.output,a.connection_attempts,a.connection_noise)
+ p=argparse.ArgumentParser();p.add_argument('--checkpoint',default='runs/rigid_100k/best.pt');p.add_argument('--targets',type=float,nargs='+',default=[0.1,0.5,1.0,1.5,2.0]);p.add_argument('--n-samples',type=int,default=32);p.add_argument('--num-rings',type=int,default=13);p.add_argument('--guidance',type=float,default=1.5);p.add_argument('--seed',type=int,default=123);p.add_argument('--connection-attempts',type=int,default=1);p.add_argument('--connection-noise',type=float,default=.35);p.add_argument('--validity-dataset',type=Path);p.add_argument('--validity-scorer',type=Path);p.add_argument('--validity-weight',type=float,default=2.0);p.add_argument('--output',type=Path,default=Path('samples/rigid_100k.jsonl'));a=p.parse_args();sample(a.checkpoint,a.targets,a.n_samples,a.num_rings,a.guidance,a.seed,a.output,a.connection_attempts,a.connection_noise,a.validity_dataset,a.validity_scorer,a.validity_weight)
 if __name__=='__main__':main()
