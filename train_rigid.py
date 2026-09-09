@@ -18,6 +18,7 @@ def make_batch(batch,model,schedule,device,training=True):
  types=torch.where(mask,batch['ring_types'],torch.full_like(batch['ring_types'],model.ring_pad_token));t=torch.randint(schedule.timesteps,(mask.shape[0],),device=device);xc,cn=schedule.q_sample(batch['centers'],t);xn,nn=schedule.q_sample(batch['normals'],t);rt=schedule.corrupt_tokens(types,t,model.ring_mask_token,mask);ct=schedule.corrupt_tokens(batch['connection_types'],t,model.connection_mask_token,pair);drop=(torch.rand(mask.shape[0],device=device)<model.condition_dropout) if training and model.condition_dim else None;pred=model(rt,xc,xn,ct,mask,t,batch['property'],drop);return batch,mask,pair,upper,cn,nn,pred
 def loss_terms(args,class_weights,chemical=None):
  batch,mask,pair,upper,cn,nn,pred=args;terms={}
+ if 'property_pred' in pred:terms['property']=F.smooth_l1_loss(pred['property_pred'],batch['property'])
  terms['center']=masked_mean((pred['center_noise']-cn).square().sum(-1),mask);terms['normal']=masked_mean((pred['normal_noise']-nn).square().sum(-1),mask);terms['ring']=F.cross_entropy(pred['ring_logits'][mask],batch['ring_types'][mask]);terms['connection']=F.cross_entropy(pred['connection_logits'][upper],batch['connection_types'][upper],weight=class_weights);material=pair&batch['connection_types'].ne(int(ConnectionType.NONE));terms['port']=F.cross_entropy(pred['port_logits'][material],batch['ports'][material]) if material.any() else terms['center'].new_zeros(())
  if chemical is not None:
   aux=chemical(pred['connection_logits'],pred['port_logits'],batch['ring_types'],mask)
@@ -35,7 +36,7 @@ def main():
  signatures=[x['signature'] for x in sorted(train_ds.manifest['templates'],key=lambda x:x['id'])];chemical=ChemicalConstraintLoss(signatures,model.max_ports).to(device) if cfg['training'].get('chemical_constraints',{}).get('enabled',False) else None
  opt=torch.optim.AdamW(model.parameters(),lr=float(cfg['training']['learning_rate']),weight_decay=float(cfg['training']['weight_decay']));scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=int(cfg['training']['epochs']));start_epoch=step=0
  if a.seed_model:
-  state=torch.load(a.seed_model,map_location=device,weights_only=False);model.load_state_dict(state['model']);print('seeded model weights from',a.seed_model,flush=True)
+  state=torch.load(a.seed_model,map_location=device,weights_only=False);incompat=model.load_state_dict(state['model'],strict=False);print('seeded model weights from',a.seed_model,'missing',list(incompat.missing_keys),'unexpected',list(incompat.unexpected_keys),flush=True)
  if a.resume:
   state=torch.load(a.resume,map_location=device,weights_only=False);model.load_state_dict(state['model']);opt.load_state_dict(state['optimizer']);scheduler.load_state_dict(state['scheduler']);start_epoch=state['epoch']+1;step=state['step'];print('resumed',a.resume,flush=True)
  tc=cfg['training'].get('curriculum',{});curriculum=ValidityCurriculumSampler(train_ds,tc.get('fractions',[.4,.7,1.]),tc.get('milestones',[0,10,20]),seed) if tc.get('enabled',False) else None

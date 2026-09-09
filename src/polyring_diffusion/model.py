@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 from .chem import element_record
-from .chem import element_record
 from .diffusion import SinusoidalTimeEmbedding
 from .graph import ConnectionType
 from .templates import DEFAULT_LIBRARY, TemplateLibrary
@@ -41,7 +40,8 @@ class RingDenoiser(nn.Module):
     """Predict clean categorical states and continuous noise for ring poses."""
     def __init__(self,hidden_dim:int=192,num_layers:int=6,time_dim:int=64,max_ports:int=8,
                  library:TemplateLibrary=DEFAULT_LIBRARY,num_templates:int|None=None,
-                 template_features:list[list[float]]|Tensor|None=None,condition_dim:int=0,condition_dropout:float=0.1):
+                 template_features:list[list[float]]|Tensor|None=None,condition_dim:int=0,condition_dropout:float=0.1,
+                 property_head:bool=False):
         super().__init__()
         if template_features is None:
             base=template_feature_table(library); resolved=len(library) if num_templates is None else int(num_templates)
@@ -55,8 +55,9 @@ class RingDenoiser(nn.Module):
         self.ring_embedding=nn.Embedding(resolved+2,hidden_dim); self.connection_embedding=nn.Embedding(len(ConnectionType)+1,hidden_dim)
         mean=base.mean(0,keepdim=True); self.register_buffer('template_features',torch.cat([base,mean,torch.zeros_like(mean)]))
         self.time_embedding=SinusoidalTimeEmbedding(time_dim); self.input_projection=nn.Sequential(nn.Linear(hidden_dim+time_dim+base.shape[1],hidden_dim),nn.SiLU(),nn.Linear(hidden_dim,hidden_dim))
-        self.condition_dim=int(condition_dim); self.condition_dropout=float(condition_dropout)
+        self.condition_dim=int(condition_dim); self.condition_dropout=float(condition_dropout); self.has_property_head=bool(property_head)
         self.condition_projection=nn.Sequential(nn.Linear(self.condition_dim,hidden_dim),nn.SiLU(),nn.Linear(hidden_dim,hidden_dim)) if self.condition_dim else None
+        self.property_head=nn.Sequential(nn.Linear(hidden_dim,hidden_dim),nn.SiLU(),nn.Linear(hidden_dim,self.condition_dim)) if self.has_property_head and self.condition_dim else None
         self.layers=nn.ModuleList(DenseEquivariantLayer(hidden_dim) for _ in range(num_layers)); self.ring_head=nn.Linear(hidden_dim,resolved); pair_dim=hidden_dim*3+2
         self.connection_head=nn.Sequential(nn.Linear(pair_dim,hidden_dim),nn.SiLU(),nn.Linear(hidden_dim,len(ConnectionType)))
         self.port_head=nn.Sequential(nn.Linear(pair_dim,hidden_dim),nn.SiLU(),nn.Linear(hidden_dim,max_ports))
@@ -76,4 +77,8 @@ class RingDenoiser(nn.Module):
         pair_scale=physical_radius[:,:,None,:]+physical_radius[:,None,:,:]; pair_scale=torch.where(valid_pair.unsqueeze(-1),pair_scale,torch.ones_like(pair_scale))
         nd2=distance2/pair_scale.square().clamp_min(1e-6); normal_dot=(normals[:,:,None,:]*normals[:,None,:,:]).sum(-1,keepdim=True)*pair_float
         pair_features=torch.cat([left,right,messages,nd2,normal_dot],-1); connection_logits=self.connection_head(pair_features); connection_logits=.5*(connection_logits+connection_logits.transpose(1,2))
-        return {'center_noise':centers-initial_centers,'normal_noise':normals-initial_normals,'ring_logits':self.ring_head(hidden),'connection_logits':connection_logits,'port_logits':self.port_head(pair_features),'hidden':hidden}
+        output={'center_noise':centers-initial_centers,'normal_noise':normals-initial_normals,'ring_logits':self.ring_head(hidden),'connection_logits':connection_logits,'port_logits':self.port_head(pair_features),'hidden':hidden}
+        if self.property_head is not None:
+            denom=node_mask.sum(1,keepdim=True).clamp_min(1).to(hidden.dtype)
+            output['property_pred']=self.property_head((hidden*node_mask.unsqueeze(-1)).sum(1)/denom)
+        return output
