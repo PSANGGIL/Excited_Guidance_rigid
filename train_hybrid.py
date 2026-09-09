@@ -35,7 +35,7 @@ def main():
   model.train();sums={};nb=0;started=time.time()
   for raw in tl:
    with torch.autocast('cuda',dtype=torch.bfloat16,enabled=cfg['training'].get('bf16',True)):term=losses(batch_forward(raw,model,schedule,device,True),cw,chemical);loss=sum(weights.get(k,0)*v for k,v in term.items())
-   opt.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),cfg['training']['grad_clip']);opt.step();step+=1;nb+=1;sums['loss']=sums.get('loss',0)+float(loss);[sums.__setitem__(k,sums.get(k,0)+float(v)) for k,v in term.items()]
+   opt.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),cfg['training']['grad_clip']);opt.step();step+=1;nb+=1;sums['loss']=sums.get('loss',0)+float(loss.detach());[sums.__setitem__(k,sums.get(k,0)+float(v.detach())) for k,v in term.items()]
   model.eval();vs={};vn=0
   with torch.no_grad():
    for raw in vl:
