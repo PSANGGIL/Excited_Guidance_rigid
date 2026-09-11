@@ -10,6 +10,7 @@ class RigidRingDataset(Dataset[dict[str, Tensor]]):
     def __init__(self, root: str|Path, split: str, property_mean: float|None=None, property_std: float|None=None):
         self.root=Path(root); self.manifest=json.loads((self.root/'manifest.json').read_text())
         self.template_hash_to_id={int(x['hash']):int(x['id']) for x in self.manifest['templates']}
+        self.max_ports=max(len(x['signature']) for x in self.manifest['templates'])
         info=next(x for x in self.manifest['splits'] if x['name']==split)
         self.shards=[]; self.ends=[]; total=0; all_props=[]
         radius_sum=torch.zeros(len(self.template_hash_to_id)); radius_count=torch.zeros_like(radius_sum)
@@ -17,7 +18,7 @@ class RigidRingDataset(Dataset[dict[str, Tensor]]):
             raw=torch.load(self.root/rel,map_location='cpu',weights_only=False)
             hashes=raw['ring_template_hashes']; ids=torch.empty_like(hashes)
             for h in torch.unique(hashes).tolist(): ids[hashes==h]=self.template_hash_to_id[int(h)]
-            shard={k:raw[k] for k in ('ring_centers','ring_normals','ring_radii','ring_offsets','connections','connection_offsets','properties','raw_properties','source_rows')}
+            shard={k:raw[k] for k in ('ring_centers','ring_normals','ring_radii','ring_offsets','connections','connection_offsets','ring_atom_indices','ring_atom_offsets','per_ring_atom_offsets','connection_shared_atoms','properties','raw_properties','source_rows')}
             shard['ring_types']=ids; n=len(raw['smiles']); shard['length']=n
             self.shards.append(shard); total+=n; self.ends.append(total); all_props.append(raw['properties'].float())
             radius_sum.scatter_add_(0,ids,raw['ring_radii'].float()); radius_count.scatter_add_(0,ids,torch.ones_like(raw['ring_radii'].float()))
@@ -40,29 +41,35 @@ class RigidRingDataset(Dataset[dict[str, Tensor]]):
         si=bisect.bisect_right(self.ends,index); base=0 if si==0 else self.ends[si-1]; i=index-base; s=self.shards[si]
         rs,re=map(int,s['ring_offsets'][i:i+2]); es,ee=map(int,s['connection_offsets'][i:i+2]); n=re-rs
         conn=torch.zeros((n,n),dtype=torch.long); ports=torch.zeros((n,n),dtype=torch.long)
-        orientation=torch.zeros((n,n),dtype=torch.long)
-        for left,right,kind,lp,rp,reverse in s['connections'][es:ee].tolist():
-            if kind>3: continue
-            conn[left,right]=conn[right,left]=kind; ports[left,right]=lp; ports[right,left]=rp
-            orientation[left,right]=orientation[right,left]=reverse
+        orientation=torch.zeros((n,n),dtype=torch.long); junction_ports=torch.zeros((n,n,self.max_ports),dtype=torch.bool)
+        ra,rb=map(int,s['ring_atom_offsets'][i:i+2]);ring_atoms=s['ring_atom_indices'][ra:rb].tolist();ring_offsets=s['per_ring_atom_offsets'][i].tolist();shared_rows=s['connection_shared_atoms'][i]
+        for ci,(left,right,kind,lp,rp,reverse) in enumerate(s['connections'][es:ee].tolist()):
+            conn[left,right]=conn[right,left]=kind
+            if kind<=3:ports[left,right]=lp;ports[right,left]=rp;orientation[left,right]=orientation[right,left]=reverse
+            for atom in shared_rows[ci]:
+                for source,target in ((left,right),(right,left)):
+                    local=ring_atoms[ring_offsets[source]:ring_offsets[source+1]]
+                    if atom in local:junction_ports[source,target,local.index(atom)]=True
         return {'ring_types':s['ring_types'][rs:re].long(),'centers':s['ring_centers'][rs:re].float(),
           'normals':s['ring_normals'][rs:re].float(),'radii':s['ring_radii'][rs:re].float(),
-          'connection_types':conn,'ports':ports,'orientation':orientation,
+          'connection_types':conn,'ports':ports,'orientation':orientation,'junction_ports':junction_ports,
           'property':((s['properties'][i].float()-self.property_mean)/self.property_std).reshape(1),
           'raw_property':s['raw_properties'][i].float().reshape(1),'source_row':torch.tensor(int(s['source_rows'][i]))}
 
 def collate_rigid(batch:list[dict[str,Tensor]])->dict[str,Tensor]:
-    b=len(batch); n=max(len(x['ring_types']) for x in batch)
+    b=len(batch); n=max(1,max(len(x['ring_types']) for x in batch));max_ports=max([x['junction_ports'].shape[-1] for x in batch if 'junction_ports' in x] or [1])
     out={'ring_types':torch.zeros((b,n),dtype=torch.long),'node_mask':torch.zeros((b,n),dtype=torch.bool),
       'centers':torch.zeros((b,n,3)),'normals':torch.zeros((b,n,3)),
       'connection_types':torch.zeros((b,n,n),dtype=torch.long),'ports':torch.zeros((b,n,n),dtype=torch.long),
-      'orientation':torch.zeros((b,n,n),dtype=torch.long),
+      'orientation':torch.zeros((b,n,n),dtype=torch.long),'junction_ports':torch.zeros((b,n,n,max_ports),dtype=torch.bool),
       'property':torch.stack([x['property'] for x in batch]),'raw_property':torch.stack([x['raw_property'] for x in batch]),
       'source_row':torch.stack([x['source_row'] for x in batch])}
     for i,x in enumerate(batch):
         m=len(x['ring_types']); out['ring_types'][i,:m]=x['ring_types']; out['node_mask'][i,:m]=True
         out['centers'][i,:m]=x['centers']-x['centers'].mean(0,keepdim=True); out['normals'][i,:m]=x['normals']
         for key in ('connection_types','ports','orientation'): out[key][i,:m,:m]=x[key]
+
+        if 'junction_ports' in x:out['junction_ports'][i,:m,:m,:x['junction_ports'].shape[-1]]=x['junction_ports']
     return out
 
 class ValidityCurriculumSampler(torch.utils.data.Sampler[int]):

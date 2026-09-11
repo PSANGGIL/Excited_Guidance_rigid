@@ -1,0 +1,49 @@
+seed: 48
+device: cuda:0
+data:
+  root: data_qcdge_a10_full
+diffusion:
+  timesteps: 200
+  beta_start: 0.0001
+  beta_end: 0.02
+model:
+  hidden_dim: 192
+  num_layers: 6
+  time_dim: 64
+  max_ports: 10
+  condition_dim: 120
+  condition_dropout: 0.2
+  property_head: true
+  atom_hidden_dim: 192
+  atom_layers: 4
+  max_free_atoms: 10
+training:
+  batch_size: 32768
+  num_workers: 0
+  epochs: 10000
+  learning_rate: 0.00005
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  bf16: true
+  connection_class_weights: [0.05, 1.0, 1.0, 1.0, 1.0]
+  loss_weights:
+    center: 1.0
+    normal: 0.25
+    ring: 1.0
+    connection: 1.0
+    port: 0.5
+    junction_port: 1.0
+    property: 0.25
+    valence: 0.5
+    kekule: 0.5
+    port_validity: 0.3
+    atom_coordinate: 1.0
+    atom_type: 1.0
+    atom_charge: 0.25
+    atom_bond: 1.0
+    attachment: 1.0
+    attachment_port: 0.5
+    atom_count: 0.5
+  validation_batches: 10
+  condition_diagnostics_every: 10
+  output_dir: runs/qcdge_a10_junction_incidence

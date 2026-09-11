@@ -174,3 +174,22 @@ PYTHONPATH=.deps:src python sample_rigid.py \
 standardized using train-split statistics. Generated JSONL records are projected
 connected ring graphs. They are not an independent quantum-chemical validation
 that the requested oscillator strength was achieved.
+
+
+## Current QCDGE model variants
+
+The repository now contains two distinct QCDGE generation paths:
+
+- `train_hybrid.py` / `sample_hybrid.py`: the trained rigid-ring-template plus
+  free-heavy-atom baseline. It jointly diffuses ring geometry/topology and
+  non-ring heavy atoms, and supports spectrum conditioning with classifier-free
+  guidance and condition-response diagnostics.
+- `train_fpa_template_free.py` / `sample_fpa_template_free.py`: the next
+  template-free FPA model. Every heavy atom remains explicit while 3--10 member
+  rings are represented by auxiliary geometric cells carrying exact atom
+  membership. Ring chemistry is stored on member atoms rather than in a finite
+  ring-template vocabulary.
+
+The full representation, objectives, checkpoint contract, validation results,
+and current limitations are documented in
+[`docs/template_free_fpa_model.md`](docs/template_free_fpa_model.md).

@@ -22,9 +22,12 @@ ELEMENTS: dict[str, ElementRecord] = {
     "N": ElementRecord(7, 1.55, 0.71, 3, 3.04),
     "O": ElementRecord(8, 1.52, 0.66, 2, 3.44),
     "F": ElementRecord(9, 1.47, 0.57, 1, 3.98),
+    "Si": ElementRecord(14, 2.10, 1.11, 4, 1.90),
     "P": ElementRecord(15, 1.80, 1.07, 3, 2.19),
     "S": ElementRecord(16, 1.80, 1.05, 2, 2.58),
     "Cl": ElementRecord(17, 1.75, 1.02, 1, 3.16),
+    "Br": ElementRecord(35, 1.85, 1.20, 1, 2.96),
+    "I": ElementRecord(53, 1.98, 1.39, 1, 2.66),
 }
 
 
@@ -47,4 +50,3 @@ def normalized_atom_features(symbol: str, formal_charge: int = 0) -> tuple[float
         record.default_valence / 6.0,
         record.electronegativity / 4.0,
     )
-

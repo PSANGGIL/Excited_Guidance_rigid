@@ -1,0 +1,40 @@
+seed: 53
+device: cuda:0
+data:
+  root: data_qcdge_a10_full
+diffusion:
+  timesteps: 200
+  beta_start: 0.0001
+  beta_end: 0.02
+model:
+  hidden_dim: 192
+  num_layers: 6
+  time_dim: 64
+  condition_dim: 120
+  condition_dropout: 0.2
+training:
+  batch_size: 256
+  num_workers: 0
+  epochs: 10000
+  learning_rate: 0.00005
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  bf16: true
+  validation_batches: 10
+  output_dir: runs/qcdge_a10_fpa_scratch
+  loss_weights:
+    atom_coordinate: 1.0
+    cell_center: 1.0
+    cell_normal: 0.25
+    cell_tangent: 0.25
+    atom_type: 1.0
+    atom_charge: 0.25
+    atom_bond: 1.0
+    cell_type: 1.0
+    cell_size: 0.5
+    fusion: 1.0
+    left_port: 0.5
+    right_port: 0.5
+    membership: 1.0
+    atom_count: 0.5
+    cell_count: 0.5

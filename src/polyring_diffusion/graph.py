@@ -14,6 +14,7 @@ class ConnectionType(IntEnum):
     SINGLE = 1
     FUSED = 2
     SPIRO = 3
+    COMPLEX = 4
 
 
 @dataclass(frozen=True)
