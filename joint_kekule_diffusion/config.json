@@ -1,0 +1,7 @@
+{
+  "data": {"root": "joint_kekule_diffusion/data_qcdge_ab_aromatic", "molecules": 32663, "aromatic_only": true, "condition": ["s1_energy", "t1_energy"], "fixed_heavy_atoms": [10]},
+  "model": {"hidden": 256, "layers": 8, "max_atoms": 32, "condition_dropout": 0.1, "bond_classes": ["none", "single", "double", "triple"]},
+  "diffusion": {"timesteps": 500, "beta_start": 0.0001, "beta_end": 0.02, "undirected_bond_corruption": true},
+  "loss": {"valid_kekule_marginal": true, "aromatic_edge_binary": true, "valence_weight": 0.2, "connectivity_weight": 0.05, "charge_balance_weight": 0.05, "radical_count_weight": 0.05},
+  "training": {"epochs": 10000, "batch_size": 1280, "learning_rate": 0.0002, "gradient_clip": 1.0, "save_every": 10, "deterministic_validation_seed": 1701}
+}
