@@ -2,11 +2,13 @@
 """Production trainer for the consistency-corrected joint Kekule DDPM."""
 from __future__ import annotations
 import argparse,json,os,random,time
+from functools import partial
 from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from .data import QCDGEHierarchyDataset,collate_hierarchy
+from .hp1kg_data import HP1KGDataset,collate_hp1kg
 from .model import JointDiffusion,JointKekuleDDPM,joint_training_loss
 
 TRAIN_KEYS={'condition','ring_mask','atom_mask','atom_type','atom_charge','atom_hydrogen','atom_radical','atom_positions','atom_bonds','aromatic_cycle_edges','aromatic_cycle_double_count','aromatic_cycle_order','aromatic_cycle_size','aromatic_edge_mask'}
@@ -44,19 +46,34 @@ def atomic_save(payload,path):
  path=Path(path);tmp=path.with_suffix(path.suffix+'.tmp');torch.save(payload,tmp);os.replace(tmp,path)
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--root',default='joint_kekule_diffusion/data_qcdge_ab_aromatic');p.add_argument('--run-dir',required=True);p.add_argument('--epochs',type=int,default=10000);p.add_argument('--batch-size',type=int,default=512);p.add_argument('--workers',type=int,default=4);p.add_argument('--hidden',type=int,default=256);p.add_argument('--layers',type=int,default=8);p.add_argument('--lr',type=float,default=2e-4);p.add_argument('--grad-clip',type=float,default=1.0);p.add_argument('--save-every',type=int,default=10);p.add_argument('--resume');p.add_argument('--seed',type=int,default=61);a=p.parse_args()
- if a.epochs<=0 or a.batch_size<=0 or a.workers<0 or a.hidden%2:raise ValueError('invalid training dimensions')
+ p=argparse.ArgumentParser();p.add_argument('--root',default='joint_kekule_diffusion/data_qcdge_ab_aromatic');p.add_argument('--run-dir',required=True);p.add_argument('--epochs',type=int,default=10000);p.add_argument('--batch-size',type=int,default=512);p.add_argument('--workers',type=int,default=4);p.add_argument('--hidden',type=int,default=256);p.add_argument('--layers',type=int,default=8);p.add_argument('--lr',type=float,default=2e-4);p.add_argument('--grad-clip',type=float,default=1.0);p.add_argument('--save-every',type=int,default=10);p.add_argument('--resume');p.add_argument('--seed',type=int,default=61)
+ p.add_argument('--s1-rbf-bins',type=int,default=24,help='RBF features for the single normalized S1 scalar')
+ p.add_argument('--t1-rbf-bins',type=int,default=24,help='RBF features for the single normalized T1 scalar')
+ p.add_argument('--condition-rbf-min',type=float,default=-5.,help='lower RBF center in normalized condition units')
+ p.add_argument('--condition-rbf-max',type=float,default=5.,help='upper RBF center in normalized condition units')
+ p.add_argument('--condition-rbf-width-scale',type=float,default=1.,help='Gaussian width as a multiple of center spacing')
+ p.add_argument('--condition-dropout',type=float,default=.1,help='CFG unconditional training probability')
+ p.add_argument('--dataset-kind',choices=('auto','qcdge','hp1kg'),default='auto')
+ p.add_argument('--max-atoms',type=int,default=0,help='0 infers the dataset maximum');a=p.parse_args()
+ if a.epochs<=0 or a.batch_size<=0 or a.workers<0 or a.hidden%2 or a.s1_rbf_bins<2 or a.t1_rbf_bins<2 or not 0<=a.condition_dropout<1:raise ValueError('invalid training dimensions or condition configuration')
  random.seed(a.seed);np.random.seed(a.seed);torch.manual_seed(a.seed);torch.cuda.manual_seed_all(a.seed);torch.backends.cuda.matmul.allow_tf32=True
  device=torch.device('cuda');run=Path(a.run_dir);run.mkdir(parents=True,exist_ok=True);(run/'checkpoints').mkdir(exist_ok=True)
- train=QCDGEHierarchyDataset(a.root,'train');val=QCDGEHierarchyDataset(a.root,'val',condition_stats=train.condition_stats,atom_map=train.atom_map)
- loader=DataLoader(train,batch_size=a.batch_size,shuffle=True,num_workers=a.workers,pin_memory=True,persistent_workers=a.workers>0,collate_fn=collate_joint,drop_last=False)
- vloader=DataLoader(val,batch_size=a.batch_size,shuffle=False,num_workers=max(1,a.workers//2),pin_memory=True,persistent_workers=a.workers>0,collate_fn=collate_joint)
- model=JointKekuleDDPM(a.hidden,32,len(train.atom_map),a.layers,.1).to(device);diff=JointDiffusion().to(device);opt=torch.optim.AdamW(model.parameters(),lr=a.lr,weight_decay=1e-4);sched=torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=a.epochs);start=0;step=0
+ manifest=json.loads((Path(a.root)/'manifest.json').read_text());kind=a.dataset_kind
+ if kind=='auto':kind='hp1kg' if manifest.get('dataset_type')=='hp1kg_nevpt2' else 'qcdge'
+ dataset_cls=HP1KGDataset if kind=='hp1kg' else QCDGEHierarchyDataset
+ train=dataset_cls(a.root,'train');val=dataset_cls(a.root,'val',condition_stats=train.condition_stats,atom_map=train.atom_map)
+ count_at=train.heavy_count_at if hasattr(train,'heavy_count_at') else train.base.heavy_count_at
+ observed_max=max(count_at(i) for i in range(len(train)));max_atoms=a.max_atoms or (manifest.get('heavy_atom_max',observed_max) if kind=='hp1kg' else 32)
+ if max_atoms<observed_max:raise ValueError(f'max_atoms={max_atoms} below observed train maximum {observed_max}')
+ collate=partial(collate_hp1kg,max_atoms=max_atoms) if kind=='hp1kg' else collate_joint
+ loader=DataLoader(train,batch_size=a.batch_size,shuffle=True,num_workers=a.workers,pin_memory=True,persistent_workers=a.workers>0,collate_fn=collate,drop_last=False)
+ vloader=DataLoader(val,batch_size=a.batch_size,shuffle=False,num_workers=max(1,a.workers//2),pin_memory=True,persistent_workers=a.workers>0,collate_fn=collate)
+ model=JointKekuleDDPM(a.hidden,max_atoms,len(train.atom_map),a.layers,a.condition_dropout,a.s1_rbf_bins,a.t1_rbf_bins,a.condition_rbf_min,a.condition_rbf_max,a.condition_rbf_width_scale).to(device);diff=JointDiffusion().to(device);opt=torch.optim.AdamW(model.parameters(),lr=a.lr,weight_decay=1e-4);sched=torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=a.epochs);start=0;step=0
  if a.resume:
   ck=torch.load(a.resume,map_location='cpu',weights_only=False);model.load_state_dict(ck['model']);opt.load_state_dict(ck['optimizer']);sched.load_state_dict(ck['scheduler']);start=ck['epoch']+1;step=ck['step']
   if 'rng' in ck:
    random.setstate(ck['rng']['python']);np.random.set_state(ck['rng']['numpy']);torch.set_rng_state(ck['rng']['torch']);torch.cuda.set_rng_state_all(ck['rng']['cuda'])
- meta={'schema_version':2,'args':vars(a),'condition_stats':train.condition_stats,'atom_map':train.atom_map,'train_size':len(train),'val_size':len(val),'pid':os.getpid(),'fixed_atom_count':sorted({train.base.heavy_count_at(i) for i in range(len(train))})};(run/'metadata.json').write_text(json.dumps(meta,indent=2,default=lambda x:x.tolist() if hasattr(x,'tolist') else str(x)))
+ meta={'schema_version':4,'model_kind':'factorized_edge_uniform_d3pm_v2','args':vars(a),'dataset_kind':kind,'max_atoms':max_atoms,'condition_stats':train.condition_stats,'atom_map':train.atom_map,'train_size':len(train),'val_size':len(val),'pid':os.getpid(),'fixed_atom_count':sorted({count_at(i) for i in range(len(train))})};(run/'metadata.json').write_text(json.dumps(meta,indent=2,default=lambda x:x.tolist() if hasattr(x,'tolist') else str(x)))
  model.train();started=time.time()
  for epoch in range(start,a.epochs):
   sums={};seen=0

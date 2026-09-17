@@ -46,3 +46,19 @@ PYTHONPATH=. /home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python -m joint_kekul
 ```
 
 Outputs include `molecules.csv`, `summary.json`, `unique_novel_connected.sdf`, and `novel_valid_*.png`.
+
+
+## HP1KG / BenchmarkSet1500 input
+
+`hp1kg_data.py` adds a separate NEVPT2 adapter for the 1,581-molecule HP1KG dataset. It preserves all observed B/C/N/O/F/Si/P/S/Cl/As/Se/Br atom classes, formal charges, Kekule bond targets, aromatic-cycle supervision, negative S1-T1 gaps, and variable heavy-atom counts (6-69). Since the CSV has no Cartesian coordinates, deterministic ETKDGv3 conformers are cached; the manifest records MMFF/UFF/unoptimized/2D provenance.
+
+Build and train with:
+
+```bash
+python -m joint_kekule_diffusion.hp1kg_data --csv /path/to/BenchmarkSet1500.csv --output joint_kekule_diffusion/data_hp1kg_nevpt2
+python -m joint_kekule_diffusion.train --root joint_kekule_diffusion/data_hp1kg_nevpt2 --dataset-kind hp1kg --max-atoms 69 --run-dir runs/hp1kg_nevpt2
+```
+
+QCDGE and HP1KG excited-state labels must not be silently pooled: HP1KG conditioning uses NEVPT2 S1/T1 and carries its own train-split normalization.
+## Factorized-edge uniform D3PM v2
+This branch separates edge existence from conditional bond type, uses exact uniform-multinomial reverse posteriors, samples atom count with `--atoms 0`, and matches the Cartesian terminal prior. It requires fresh training and cannot resume older absorbing-mask checkpoints.
