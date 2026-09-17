@@ -1,6 +1,6 @@
-# Joint Kekule molecular DDPM v3
+# Joint Kekule molecular DDPM v4
 
-Self-contained source bundle for the consistency-corrected aromatic QCDGE A+B model. The older A-only PID may keep running because Python already loaded its original modules; start v3 as a fresh run.
+Self-contained source bundle for the consistency-corrected aromatic QCDGE A+B model. The older A-only PID may keep running because Python already loaded its original modules; start v4 as a fresh run.
 
 ## Core guarantees
 
@@ -24,25 +24,25 @@ Self-contained source bundle for the consistency-corrected aromatic QCDGE A+B mo
 - `data_qcdge_a10_full/`: preserved A-only database used by the older run.
 - `raw_qcdge/A_10.hdf5`, `raw_qcdge/B_10.hdf5`: preserved raw inputs.
 
-## Train v3 from scratch
+## Train v4 from scratch
 
 ```bash
 PYTHONPATH=. /home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python -m joint_kekule_diffusion.train \
   --root joint_kekule_diffusion/data_hp1kg_nevpt2 --dataset-kind hp1kg --max-atoms 69 \
-  --run-dir runs/joint_kekule_hp1kg_marginal_d3pm_v3 \
+  --run-dir runs/joint_kekule_hp1kg_marginal_d3pm_v4 \
   --epochs 10000 --batch-size 320 --workers 4 --hidden 256 --layers 8
 ```
 
-v3 checkpoints are intentionally incompatible with v1/v2 because the categorical transition kernels and training objective changed; train from scratch.
+v4 optimizer resume is intentionally incompatible with v1/v2/v3 because the categorical transition kernels and training objective changed; train from scratch.
 
 ## Sample
 
 ```bash
 PYTHONPATH=. /home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python -m joint_kekule_diffusion.sample \
-  --checkpoint runs/joint_kekule_hp1kg_marginal_d3pm_v3/checkpoints/latest.pt \
-  --metadata runs/joint_kekule_hp1kg_marginal_d3pm_v3/metadata.json \
+  --checkpoint runs/joint_kekule_hp1kg_marginal_d3pm_v4/checkpoints/latest.pt \
+  --metadata runs/joint_kekule_hp1kg_marginal_d3pm_v4/metadata.json \
   --root joint_kekule_diffusion/data_hp1kg_nevpt2 \
-  --output runs/joint_kekule_hp1kg_marginal_d3pm_v3/sample_1000 --num 1000 --atoms 0
+  --output runs/joint_kekule_hp1kg_marginal_d3pm_v4/sample_1000 --num 1000 --atoms 0
 ```
 
 Outputs include `molecules.csv`, `summary.json`, `unique_novel_connected.sdf`, and `novel_valid_*.png`.
@@ -60,8 +60,8 @@ python -m joint_kekule_diffusion.train --root joint_kekule_diffusion/data_hp1kg_
 ```
 
 QCDGE and HP1KG excited-state labels must not be silently pooled: HP1KG conditioning uses NEVPT2 S1/T1 and carries its own train-split normalization.
-## Empirical-marginal chemistry D3PM v3
+## Chemistry-stable empirical-marginal D3PM v4
 
-The v3 model uses empirical stationary categorical transitions, exact generalized reverse posteriors, hybrid x0-CE/VLB training, separate edge-existence and conditional bond-type channels, fused-component Kekule constraints, valence/connectivity projection, and periodic full reverse-rollout evaluation. It requires fresh training and intentionally rejects v2 checkpoints. Condition fidelity is monitored by a deterministic correct-condition versus shuffled-condition denoising-loss delta; final electronic-property fidelity still requires external quantum-chemistry evaluation.
+The v4 model uses empirical stationary categorical transitions, exact generalized reverse posteriors, hybrid x0-CE/VLB training, separate edge-existence and conditional bond-type channels, fused-component Kekule constraints, valence/connectivity projection, and periodic full reverse-rollout evaluation. It uses normalized graph-size losses, exact dynamic-programming Kekule marginalization, non-Kekule aromatic exceptions, charge-aware hetero matching, clipped x0 coordinate posteriors, and isolated rollout failures. It requires fresh training and intentionally rejects older optimizer checkpoints. Condition fidelity is monitored by a deterministic correct-condition versus shuffled-condition denoising-loss delta; final electronic-property fidelity still requires external quantum-chemistry evaluation.
 
-Design references: Austin et al., Structured Denoising Diffusion Models in Discrete State-Spaces (D3PM); Vignac et al., DiGress; Vignac et al., MiDi; Hoogeboom et al., Equivariant Diffusion for Molecule Generation in 3D.
+Design references: Austin et al. (D3PM); Vignac et al. (DiGress, MiDi); Hoogeboom et al. (EDM); Jo et al. (GDSS); Xu et al. (GeoDiff); Peng et al. (MolDiff); Huang et al. (JODO); Satorras et al. (EGNN); Nichol and Dhariwal (Improved DDPM); RDKit aromaticity and Kekulization documentation.

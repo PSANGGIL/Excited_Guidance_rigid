@@ -59,7 +59,7 @@ class HP1KGDataset(Dataset):
  def __len__(self):return len(self.rows)
  def heavy_count_at(self,i):return len(self.rows[i]["atom_types"])
  def __getitem__(self,i):
-  x=self.rows[i];s=self.condition_stats;cycles=[ring for ring in x["aromatic_cycles"] if all(bool(x["aromatic_edges"][ring[j],ring[(j+1)%len(ring)]]) for j in range(len(ring)))];return {**x,"aromatic_cycles":cycles,"property":torch.tensor([(x["s1"]-s["s1_energy_mean"])/s["s1_energy_std"],(x["t1"]-s["t1_energy_mean"])/s["t1_energy_std"]])}
+  x=self.rows[i];s=self.condition_stats;cycles=[ring for ring in x["aromatic_cycles"] if all(bool(x["aromatic_edges"][ring[j],ring[(j+1)%len(ring)]]) and int(x["kekule_bonds"][ring[j],ring[(j+1)%len(ring)]]) in (1,2) for j in range(len(ring)))];return {**x,"aromatic_cycles":cycles,"property":torch.tensor([(x["s1"]-s["s1_energy_mean"])/s["s1_energy_std"],(x["t1"]-s["t1_energy_mean"])/s["t1_energy_std"]])}
 
 def collate_hp1kg(rows,max_atoms):
  B=len(rows);A=max_atoms;R=max(1,max(len(x["aromatic_cycles"]) for x in rows));z=lambda *s,dtype=torch.long:torch.zeros(*s,dtype=dtype)

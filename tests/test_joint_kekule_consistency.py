@@ -1,6 +1,6 @@
 import torch
-from joint_kekule_diffusion.model import ConditionEmbedding,JointDiffusion,JointKekuleDDPM,aromatic_cycle_loss
-from joint_kekule_diffusion.sample import sample_batch
+from joint_kekule_diffusion.model import ConditionEmbedding,JointDiffusion,JointKekuleDDPM,aromatic_cycle_loss,_cycle_log_partition
+from joint_kekule_diffusion.sample import sample_batch,chemistry_projection,reverse_coords
 
 def test_bond_corruption_is_symmetric():
  d=JointDiffusion(20);x=torch.randint(4,(3,8,8));x=torch.triu(x,1);x=x+x.transpose(1,2);valid=torch.ones_like(x,dtype=torch.bool);valid.diagonal(dim1=1,dim2=2).zero_();y=d.q_token(x,torch.tensor([3,9,19]),4,valid,True);assert torch.equal(y,y.transpose(1,2));assert (y.diagonal(dim1=1,dim2=2)==0).all()
@@ -35,3 +35,19 @@ def test_scalar_conditions_use_separate_configurable_rbfs():
  assert y.shape==(3,32) and torch.isfinite(y).all()
  assert not torch.allclose(y[0],y[1]) and not torch.allclose(y[0],y[2])
  y.square().mean().backward();assert torch.isfinite(x.grad).all()
+
+
+def test_cycle_dp_matches_enumeration_and_has_finite_gradients():
+ import itertools
+ torch.manual_seed(21);length=8;doubles=3;lp=torch.randn(2,length,4,requires_grad=True);got=_cycle_log_partition(lp,doubles)
+ refs=[]
+ for b in range(2):
+  scores=[sum(lp[b,i,bits[i]+1] for i in range(length)) for bits in itertools.product((0,1),repeat=length) if sum(bits)==doubles and all(not(bits[i] and bits[(i+1)%length]) for i in range(length))]
+  refs.append(torch.logsumexp(torch.stack(scores),0))
+ assert torch.allclose(got,torch.stack(refs),atol=2e-6);got.sum().backward();assert torch.isfinite(lp.grad).all()
+
+def test_spanning_projection_upgrades_without_double_counting_valence():
+ mask=torch.ones(1,2,dtype=torch.bool);state={"edge_exists":torch.tensor([[[0,1],[1,0]]]),"bond_type":torch.tensor([[[0,2],[2,0]]]),"atom_type":torch.zeros(1,2,dtype=torch.long),"charge":torch.full((1,2),2),"hydrogen":torch.ones(1,2,dtype=torch.long)};outputs={"edge_logits":torch.tensor([[[[8.,-8.],[-8.,8.]],[[-8.,8.],[8.,-8.]]]]),"bond_type_logits":torch.zeros(1,2,2,3),"aromatic_edge_logits":torch.full((1,2,2),-8.)};outputs["bond_type_logits"][...,2]=8.;result=chemistry_projection(state,outputs,mask,[4],True,False,["C"]);bonds=result["edge_exists"]*(result["bond_type"]+1);assert int(bonds[0,0,1])==3 and int(result["hydrogen"][0,0])==1
+
+def test_reverse_coordinate_clip_is_finite_and_centered():
+ diffusion=JointDiffusion(20);mask=torch.ones(2,7,dtype=torch.bool);x=torch.randn(2,7,3)*1e6;eps=torch.randn_like(x)*1e6;out=reverse_coords(x,eps,19,diffusion,mask,25.);assert torch.isfinite(out).all();assert out.norm(dim=-1).max()<=25.0001;assert out.mean(1).abs().max()<1e-5
