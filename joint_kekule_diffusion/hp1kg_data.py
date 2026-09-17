@@ -29,7 +29,7 @@ def _record(row,i,seed):
  cycles=[]
  for ring in Chem.GetSymmSSSR(mol):
   ring=tuple(map(int,ring))
-  if all(arom_atoms[j] for j in ring):cycles.append(ring)
+  if all((mol.GetBondBetweenAtoms(ring[j],ring[(j+1)%len(ring)]) is not None and mol.GetBondBetweenAtoms(ring[j],ring[(j+1)%len(ring)]).GetIsAromatic()) for j in range(len(ring))):cycles.append(ring)
  q=torch.tensor([a.GetFormalCharge() for a in mol.GetAtoms()]);h=torch.tensor([a.GetTotalNumHs() for a in mol.GetAtoms()]);rad=torch.tensor([a.GetNumRadicalElectrons() for a in mol.GetAtoms()])
  if q.min() < -2 or q.max()>2 or h.max()>4 or rad.max()>2:raise ValueError("state outside categorical vocabulary")
  kek=Chem.Mol(mol);Chem.Kekulize(kek,clearAromaticFlags=True);bonds=torch.zeros(len(symbols),len(symbols),dtype=torch.long)
@@ -59,7 +59,7 @@ class HP1KGDataset(Dataset):
  def __len__(self):return len(self.rows)
  def heavy_count_at(self,i):return len(self.rows[i]["atom_types"])
  def __getitem__(self,i):
-  x=self.rows[i];s=self.condition_stats;return {**x,"property":torch.tensor([(x["s1"]-s["s1_energy_mean"])/s["s1_energy_std"],(x["t1"]-s["t1_energy_mean"])/s["t1_energy_std"]])}
+  x=self.rows[i];s=self.condition_stats;cycles=[ring for ring in x["aromatic_cycles"] if all(bool(x["aromatic_edges"][ring[j],ring[(j+1)%len(ring)]]) for j in range(len(ring)))];return {**x,"aromatic_cycles":cycles,"property":torch.tensor([(x["s1"]-s["s1_energy_mean"])/s["s1_energy_std"],(x["t1"]-s["t1_energy_mean"])/s["t1_energy_std"]])}
 
 def collate_hp1kg(rows,max_atoms):
  B=len(rows);A=max_atoms;R=max(1,max(len(x["aromatic_cycles"]) for x in rows));z=lambda *s,dtype=torch.long:torch.zeros(*s,dtype=dtype)

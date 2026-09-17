@@ -60,26 +60,34 @@ class JointKekuleDDPM(nn.Module):
  def forward(self,y,t,s,unconditional=False):
   m,p=s['atom_mask'],s['positions'];_,n=m.shape
   if n>self.max_atoms:raise ValueError('atom dimension exceeds max_atoms')
-  base=self.condition_context(y,unconditional);c=base+self.time(t);x=(c[:,None]+self.ae(s['atom_type'])+self.qe(s['charge'])+self.he(s['hydrogen'])+self.re(s['radical']))*m[...,None];pair=m[:,:,None]&m[:,None,:];e=self.ee(s['edge_exists'])+self.be(s['bond_type']);e=(e+e.transpose(1,2))/2*pair[...,None]
+  base=self.condition_context(y,unconditional);c=base+self.time(t);x=(c[:,None]+self.ae(s['atom_type'])+self.qe(s['charge'])+self.he(s['hydrogen'])+self.re(s['radical']))*m[...,None];pair=m[:,:,None]&m[:,None,:];gate=s['edge_exists'].to(p.dtype)[...,None];e=self.ee(s['edge_exists'])+gate*self.be(s['bond_type']);e=(e+e.transpose(1,2))/2*pair[...,None]
   for layer in self.layers:x,e=layer(x,e,p,m)
   pooled=(x*m[...,None]).sum(1)/m.sum(1,keepdim=True).clamp_min(1);delta=p[:,:,None]-p[:,None];dist=delta.norm(dim=-1,keepdim=True);off=pair&~torch.eye(n,dtype=torch.bool,device=p.device)[None];w=self.coord(torch.cat((e,dist),-1))*off[...,None];eps=(w*delta).sum(2)/off.sum(2).clamp_min(1)[...,None];eps=eps-(eps*m[...,None]).sum(1,keepdim=True)/m.sum(1,keepdim=True).clamp_min(1)[...,None]
   edge_logits=self.edge_exists(e);type_logits=self.bond_type(e);elp=F.log_softmax(edge_logits,-1);tlp=F.log_softmax(type_logits,-1);bond_logits=torch.cat((elp[...,0:1],elp[...,1:2]+tlp),-1)
   return {'count_logits':self.count(base),'atom_logits':self.atom(x),'charge_logits':self.charge(x),'hydrogen_logits':self.hydrogen(x),'radical_logits':self.radical(x),'edge_logits':edge_logits,'bond_type_logits':type_logits,'bond_logits':bond_logits,'aromatic_edge_logits':self.aromatic(e).squeeze(-1),'coordinate_eps':eps*m[...,None]}
 
 class JointDiffusion(nn.Module):
- def __init__(self,timesteps=500,beta_start=1e-4,beta_end=.05):
-  super().__init__();beta=torch.linspace(beta_start,beta_end,timesteps);alpha=1-beta;self.timesteps=timesteps;self.register_buffer("beta",beta);self.register_buffer("alpha",alpha);self.register_buffer("abar",alpha.cumprod(0))
+ def __init__(self,timesteps=500,beta_start=1e-4,beta_end=.05,marginals=None):
+  super().__init__();beta=torch.linspace(beta_start,beta_end,timesteps);alpha=1-beta;self.timesteps=timesteps;self.register_buffer("beta",beta);self.register_buffer("alpha",alpha);self.register_buffer("abar",alpha.cumprod(0));marginals=marginals or {}
+  defaults={"atom":torch.ones(1),"charge":torch.ones(5),"hydrogen":torch.ones(5),"radical":torch.ones(3),"edge":torch.ones(2),"bond_type":torch.ones(3)}
+  for name,default in defaults.items():
+   value=torch.as_tensor(marginals.get(name,default),dtype=torch.float32);value=(value+1e-8)/(value+1e-8).sum();self.register_buffer(name+"_marginal",value)
  def at(self,v,t,nd):return v[t].reshape((len(t),)+(1,)*(nd-1))
- def q_token(self,x,t,classes,valid,symmetric=False):
-  """Uniform multinomial q(x_t|x_0); every state remains revisable."""
-  keep=torch.rand_like(x,dtype=torch.float32)<self.at(self.abar,t,x.ndim);random=torch.randint(classes,x.shape,device=x.device)
+ def marginal(self,name,classes,device):
+  value=getattr(self,name+"_marginal");return value.to(device) if value.numel()==classes else torch.full((classes,),1/classes,device=device)
+ def q_token(self,x,t,classes,valid,symmetric=False,name="atom"):
+  """Marginal-preserving categorical q(x_t|x_0)."""
+  keep=torch.rand_like(x,dtype=torch.float32)<self.at(self.abar,t,x.ndim);prob=self.marginal(name,classes,x.device);random=torch.multinomial(prob,x.numel(),replacement=True).reshape_as(x)
   if symmetric:
    n=x.shape[-1];up=torch.triu(torch.ones(n,n,dtype=torch.bool,device=x.device),1)[None];random=torch.where(up,random,random.transpose(1,2));keep=torch.where(up,keep,keep.transpose(1,2))
   return torch.where(valid&~keep,random,x)
- def posterior_logits(self,x_t,x0_logits,t,classes):
-  """Exact p_theta(x_{t-1}|x_t), marginalizing analytic q posterior over p_theta(x0|xt)."""
-  p0=F.softmax(x0_logits.float(),-1);ab_t=self.abar[t];ab_prev=x_t.new_tensor(1.,dtype=torch.float32) if t==0 else self.abar[t-1];alpha=ab_t/ab_prev;one=F.one_hot(x_t.long(),classes).to(p0.dtype)
-  denom=(ab_t*one+(1-ab_t)/classes).clamp_min(1e-20);weighted=p0/denom;prior=ab_prev*weighted+(1-ab_prev)/classes*weighted.sum(-1,keepdim=True);like=alpha*one+(1-alpha)/classes;posterior=(prior*like).clamp_min(1e-20);return posterior.log()-posterior.sum(-1,keepdim=True).log()
+ def posterior_logits(self,x_t,x0_logits,t,classes,name="atom"):
+  """Exact generalized D3PM posterior under a stationary empirical marginal."""
+  p0=F.softmax(x0_logits.float(),-1);t=torch.as_tensor(t,device=x_t.device,dtype=torch.long);t=t.expand(x_t.shape[0]) if t.ndim==0 else t;ab_t=self.abar[t];ab_prev=torch.where(t==0,torch.ones_like(ab_t),self.abar[(t-1).clamp_min(0)]);alpha=ab_t/ab_prev
+  shape=(len(t),)+(1,)*x_t.ndim;ab_t=ab_t.reshape(shape);ab_prev=ab_prev.reshape(shape);alpha=alpha.reshape(shape);one=F.one_hot(x_t.long(),classes).to(p0.dtype);m=self.marginal(name,classes,x_t.device);m_xt=m[x_t.long()][...,None]
+  denom=(ab_t*one+(1-ab_t)*m_xt).clamp_min(1e-20);weighted=p0/denom;prior=ab_prev*weighted+(1-ab_prev)*m*weighted.sum(-1,keepdim=True);like=alpha*one+(1-alpha)*m_xt;posterior=(prior*like).clamp_min(1e-20);return posterior.log()-posterior.sum(-1,keepdim=True).log()
+ def categorical_vlb(self,x0,x_t,x0_logits,t,classes,mask,name="atom"):
+  true_logits=F.one_hot(x0.long(),classes).float().clamp_min(1e-20).log();qlog=self.posterior_logits(x_t,true_logits,t,classes,name);plog=self.posterior_logits(x_t,x0_logits,t,classes,name);q=qlog.exp();kl=(q*(qlog-plog)).sum(-1);nll=F.cross_entropy(x0_logits.reshape(-1,classes),x0.reshape(-1),reduction="none").reshape_as(x0);at0=t.reshape((len(t),)+(1,)*(x0.ndim-1))==0;loss=torch.where(at0,nll,kl);return loss[mask].mean() if mask.any() else x0_logits.sum()*0
  def q_coords(self,x,t,mask):
   w=mask[...,None].to(x.dtype);den=w.sum(1,keepdim=True).clamp_min(1);x=(x-(x*w).sum(1,keepdim=True)/den)*w;eps=torch.randn_like(x)*w;eps=(eps-(eps*w).sum(1,keepdim=True)/den)*w;a=self.at(self.abar,t,x.ndim);return a.sqrt()*x+(1-a).sqrt()*eps,eps
 
@@ -114,19 +122,26 @@ def aromatic_cycle_loss(bond_logits,aromatic_logits,cycle_edges,double_count,rin
  assignment=torch.stack(losses).mean() if losses else zero
  return allowed+aux+assignment
 
+def aromatic_component_loss(outputs,batch):
+ """Couple all fused aromatic cycles through shared-atom double-bond incidence."""
+ edges=batch["aromatic_edge_mask"].bool();zero=outputs["bond_logits"].sum()*0
+ if not edges.any():return zero
+ bp=F.softmax(outputs["bond_logits"].float(),-1);pred_double=(bp[...,2]*edges).sum(-1);target_double=((batch["atom_bonds"]==2)&edges).sum(-1).float();atoms=edges.any(-1);incidence=F.smooth_l1_loss(pred_double[atoms],target_double[atoms]);pred_total=(bp[...,2]*edges).sum((1,2))/2;target_total=((batch["atom_bonds"]==2)&edges).sum((1,2)).float()/2;total=F.smooth_l1_loss(pred_total,target_total)
+ return .5*incidence+.2*total
+
 def global_chemistry_losses(outputs,batch):
- """Differentiable whole-graph valence, connectivity, charge and radical checks."""
- m=batch['atom_mask'];n=m.shape[1];pair=m[:,:,None]&m[:,None,:]&~torch.eye(n,dtype=torch.bool,device=m.device)[None];bp=F.softmax(outputs['bond_logits'],-1);orders=bp.new_tensor([0.,1.,2.,3.]);expected_bond=(bp*orders).sum(-1)*pair
- hp=F.softmax(outputs['hydrogen_logits'],-1);expected_h=(hp*hp.new_tensor([0.,1.,2.,3.,4.])).sum(-1);target_valence=batch['atom_hydrogen'].float()+(batch['atom_bonds'].float()*pair).sum(-1);pred_valence=expected_h+expected_bond.sum(-1);valence=F.smooth_l1_loss(pred_valence[m],target_valence[m])
- cp=F.softmax(outputs['charge_logits'],-1);expected_charge=(cp*cp.new_tensor([-2.,-1.,0.,1.,2.])).sum(-1)*m;charge=F.smooth_l1_loss(expected_charge.sum(-1),(batch['atom_charge'].float()-2).mul(m).sum(-1))
- rp=F.softmax(outputs['radical_logits'],-1);expected_radical=(rp*rp.new_tensor([0.,1.,2.])).sum(-1)*m;radical=F.smooth_l1_loss(expected_radical.sum(-1),batch['atom_radical'].float().sum(-1))
- presence=(1-bp[...,0])*pair;conn=[]
+ """Whole-graph valence, connectivity, degree, edge-count and cycle-rank calibration."""
+ m=batch["atom_mask"];n=m.shape[1];pair=m[:,:,None]&m[:,None,:]&~torch.eye(n,dtype=torch.bool,device=m.device)[None];bp=F.softmax(outputs["bond_logits"].float(),-1);orders=bp.new_tensor([0.,1.,2.,3.]);expected_bond=(bp*orders).sum(-1)*pair;presence=(1-bp[...,0])*pair;target_presence=(batch["atom_bonds"]>0)*pair
+ hp=F.softmax(outputs["hydrogen_logits"].float(),-1);expected_h=(hp*hp.new_tensor([0.,1.,2.,3.,4.])).sum(-1);target_valence=batch["atom_hydrogen"].float()+(batch["atom_bonds"].float()*pair).sum(-1);pred_valence=expected_h+expected_bond.sum(-1);valence=F.smooth_l1_loss(pred_valence[m],target_valence[m])
+ degree=F.smooth_l1_loss(presence.sum(-1)[m],target_presence.sum(-1).float()[m]);pred_edges=presence.sum((1,2))/2;target_edges=target_presence.sum((1,2)).float()/2;edge_count=F.smooth_l1_loss(pred_edges,target_edges);nodes=m.sum(-1).float();cycle_rank=F.smooth_l1_loss(pred_edges-nodes+1,target_edges-nodes+1)
+ cp=F.softmax(outputs["charge_logits"].float(),-1);expected_charge=(cp*cp.new_tensor([-2.,-1.,0.,1.,2.])).sum(-1)*m;charge=F.smooth_l1_loss(expected_charge.sum(-1),(batch["atom_charge"].float()-2).mul(m).sum(-1));rp=F.softmax(outputs["radical_logits"].float(),-1);expected_radical=(rp*rp.new_tensor([0.,1.,2.])).sum(-1)*m;radical=F.smooth_l1_loss(expected_radical.sum(-1),batch["atom_radical"].float().sum(-1))
+ conn=[]
  for count in torch.unique(m.sum(-1)).tolist():
   rows=m.sum(-1)==count;k=int(count)
   if k<=1:continue
   p=presence[rows,:k,:k];lap=torch.diag_embed(p.sum(-1))-p;sign,logdet=torch.linalg.slogdet(lap[:,:k-1,:k-1]+torch.eye(k-1,device=p.device,dtype=p.dtype)*1e-6);conn.append((F.softplus(-logdet/k)+(sign<=0).to(logdet.dtype)*10).mean())
- connectivity=torch.stack(conn).mean() if conn else outputs['bond_logits'].sum()*0
- return {'valence':.2*valence,'connectivity':.05*connectivity,'charge_balance':.05*charge,'radical_count':.05*radical}
+ connectivity=torch.stack(conn).mean() if conn else outputs["bond_logits"].sum()*0
+ return {"valence":.2*valence,"degree":.1*degree,"edge_count":.1*edge_count,"cycle_rank":.05*cycle_rank,"connectivity":.05*connectivity,"charge_balance":.05*charge,"radical_count":.05*radical}
 
 def geometry_consistency_losses(outputs,batch,noisy_positions,t,diff):
  """Tie predicted clean geometry to graph distances and suppress clashes."""
@@ -134,11 +149,12 @@ def geometry_consistency_losses(outputs,batch,noisy_positions,t,diff):
  bond_length=F.smooth_l1_loss(d[bonded],target_d[bonded]) if bonded.any() else d.sum()*0;clash=F.relu(.75-d[nonbonded]).square().mean() if nonbonded.any() else d.sum()*0
  return {"bond_length":.1*bond_length,"clash":.1*clash}
 def joint_training_loss(model,diff,b):
- """Joint uniform-D3PM graph denoising and terminal-matched Cartesian DDPM."""
- m=b["atom_mask"];B,n=m.shape;t=torch.randint(diff.timesteps,(B,),device=m.device);pair=m[:,:,None]&m[:,None,:];diag=torch.eye(n,dtype=torch.bool,device=m.device)[None];upper=pair&torch.triu(torch.ones(n,n,dtype=torch.bool,device=m.device),1)[None];pos,noise=diff.q_coords(b["atom_positions"],t,m);edge=(b["atom_bonds"]>0).long();bond_type=(b["atom_bonds"]-1).clamp_min(0)
- s={"atom_mask":m,"atom_type":diff.q_token(b["atom_type"],t,model.atom_types,m),"charge":diff.q_token(b["atom_charge"],t,5,m),"hydrogen":diff.q_token(b["atom_hydrogen"],t,5,m),"radical":diff.q_token(b["atom_radical"],t,3,m),"edge_exists":diff.q_token(edge,t,2,pair&~diag,True),"bond_type":diff.q_token(bond_type,t,3,pair&~diag,True),"positions":pos};o=model(b["condition"],t,s);arom=b["aromatic_edge_mask"]
- edge_count=edge[upper].bincount(minlength=2).float();edge_weights=(edge_count.sum()/edge_count.clamp_min(1)).clamp_max(20);edge_weights=edge_weights/edge_weights.mean();nonaromatic_edge=upper&edge.bool()&~arom
- terms={"count":F.cross_entropy(o["count_logits"],m.sum(1)-1),"atom":_ce(o["atom_logits"],b["atom_type"],m),"charge":_ce(o["charge_logits"],b["atom_charge"],m),"hydrogen":_ce(o["hydrogen_logits"],b["atom_hydrogen"],m),"radical":_ce(o["radical_logits"],b["atom_radical"],m),"edge_exists":_ce(o["edge_logits"],edge,upper,edge_weights),"bond_type":_ce(o["bond_type_logits"],bond_type,nonaromatic_edge),"aromatic_cycle":aromatic_cycle_loss(o["bond_logits"],o["aromatic_edge_logits"],b["aromatic_cycle_edges"],b["aromatic_cycle_double_count"],b["ring_mask"],b["aromatic_cycle_order"],b["aromatic_cycle_size"],arom,upper),"coordinate":((o["coordinate_eps"]-noise).square()*m[...,None]).sum()/m.sum().clamp_min(1)};terms.update(global_chemistry_losses(o,b));terms.update(geometry_consistency_losses(o,b,pos,t,diff));return sum(terms.values()),terms
+ """Empirical-marginal D3PM with hybrid x0-CE/VLB and joint Cartesian DDPM."""
+ m=b["atom_mask"];B,n=m.shape;t=torch.randint(diff.timesteps,(B,),device=m.device);pair=m[:,:,None]&m[:,None,:];diag=torch.eye(n,dtype=torch.bool,device=m.device)[None];upper=pair&torch.triu(torch.ones(n,n,dtype=torch.bool,device=m.device),1)[None];pos,noise=diff.q_coords(b["atom_positions"],t,m);edge=(b["atom_bonds"]>0).long();bond_type=(b["atom_bonds"]-1).clamp_min(0);arom=b["aromatic_edge_mask"];nonaromatic_edge=upper&edge.bool()&~arom
+ xt_atom=diff.q_token(b["atom_type"],t,model.atom_types,m,name="atom");xt_charge=diff.q_token(b["atom_charge"],t,5,m,name="charge");xt_h=diff.q_token(b["atom_hydrogen"],t,5,m,name="hydrogen");xt_rad=diff.q_token(b["atom_radical"],t,3,m,name="radical");xt_edge=diff.q_token(edge,t,2,pair&~diag,True,"edge");xt_type=diff.q_token(bond_type,t,3,pair&~diag,True,"bond_type")
+ s={"atom_mask":m,"atom_type":xt_atom,"charge":xt_charge,"hydrogen":xt_h,"radical":xt_rad,"edge_exists":xt_edge,"bond_type":xt_type,"positions":pos};o=model(b["condition"],t,s)
+ terms={"count":F.cross_entropy(o["count_logits"],m.sum(1)-1),"atom":_ce(o["atom_logits"],b["atom_type"],m),"charge":_ce(o["charge_logits"],b["atom_charge"],m),"hydrogen":_ce(o["hydrogen_logits"],b["atom_hydrogen"],m),"radical":_ce(o["radical_logits"],b["atom_radical"],m),"edge_exists":_ce(o["edge_logits"],edge,upper),"bond_type":_ce(o["bond_type_logits"],bond_type,nonaromatic_edge),"aromatic_cycle":aromatic_cycle_loss(o["bond_logits"],o["aromatic_edge_logits"],b["aromatic_cycle_edges"],b["aromatic_cycle_double_count"],b["ring_mask"],b["aromatic_cycle_order"],b["aromatic_cycle_size"],arom,upper),"aromatic_component":aromatic_component_loss(o,b),"coordinate":((o["coordinate_eps"]-noise).square()*m[...,None]).sum()/m.sum().clamp_min(1)}
+ terms.update({"vlb_atom":.1*diff.categorical_vlb(b["atom_type"],xt_atom,o["atom_logits"],t,model.atom_types,m,"atom"),"vlb_charge":.1*diff.categorical_vlb(b["atom_charge"],xt_charge,o["charge_logits"],t,5,m,"charge"),"vlb_hydrogen":.1*diff.categorical_vlb(b["atom_hydrogen"],xt_h,o["hydrogen_logits"],t,5,m,"hydrogen"),"vlb_radical":.1*diff.categorical_vlb(b["atom_radical"],xt_rad,o["radical_logits"],t,3,m,"radical"),"vlb_edge":.1*diff.categorical_vlb(edge,xt_edge,o["edge_logits"],t,2,upper,"edge"),"vlb_bond_type":.1*diff.categorical_vlb(bond_type,xt_type,o["bond_type_logits"],t,3,nonaromatic_edge,"bond_type")});terms.update(global_chemistry_losses(o,b));terms.update(geometry_consistency_losses(o,b,pos,t,diff));return sum(terms.values()),terms
 
 @dataclass(frozen=True)
 class DecodeResult:
