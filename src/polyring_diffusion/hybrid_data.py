@@ -13,7 +13,7 @@ class HybridRingAtomDataset(RigidRingDataset):
         self.atom_map=None
         for shard,rel in zip(self.shards,next(x for x in self.manifest['splits'] if x['name']==kwargs.get('split',args[1] if len(args)>1 else 'train'))['shards']):
             raw=torch.load(self.root/rel,map_location='cpu',weights_only=False)
-            for key in ('atom_positions','atom_types','atom_charges','atom_offsets','bond_indices','bond_types','bond_offsets','ring_atom_indices','ring_atom_offsets','per_ring_atom_offsets'):
+            for key in ('atom_positions','atom_types','atom_charges','atom_offsets','bond_indices','bond_types','bond_offsets','ring_atom_indices','ring_atom_offsets','per_ring_atom_offsets','smiles','molecule_ids'):
                 shard[key]=raw[key]
             for key in ('singlet_energies','singlet_oscillator_strengths','singlet_mask','triplet_energies','triplet_oscillator_strengths','triplet_mask'):
                 if key in raw:shard[key]=raw[key]

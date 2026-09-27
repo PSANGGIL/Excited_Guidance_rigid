@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from rdkit import Chem,RDLogger
 from rdkit.Chem import Draw
-from joint_kekule_ddpm import JointKekuleDDPM,JointDiffusion,decode_kekule_graph,cfg_combine
+from .model import JointKekuleDDPM,JointDiffusion,decode_kekule_graph,cfg_combine
 
 def reveal(x,logits,t,diff,token,valid,symmetric=False):
  if not torch.isfinite(logits).all():raise FloatingPointError(f'non-finite categorical logits at t={t}')
@@ -60,7 +60,9 @@ def main():
  if not all(math.isfinite(x) for x in (a.s1,a.t1,a.cfg)) or a.cfg<0:raise ValueError('conditions and CFG must be finite; CFG must be non-negative')
  RDLogger.DisableLog('rdApp.*');out=Path(a.output);out.mkdir(parents=True,exist_ok=True);meta=json.loads(Path(a.metadata).read_text());fixed=meta.get('fixed_atom_count',[10])
  if fixed and a.atoms not in fixed and not a.allow_count_extrapolation:raise ValueError(f'atoms={a.atoms} is outside trained counts {fixed}; pass --allow-count-extrapolation explicitly')
- ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False);args=meta['args'];model=JointKekuleDDPM(args['hidden'],32,len(meta['atom_map']),args['layers'],.1);model.load_state_dict(ck['model']);model.cuda().eval();diff=JointDiffusion().cuda();st=meta['condition_stats'];yn=torch.tensor([[(a.s1-st['s1_energy_mean'])/st['s1_energy_std'],(a.t1-st['t1_energy_mean'])/st['t1_energy_std']]],device='cuda');known=load_db(a.root);records=[];unique_mols=[];unique_smiles=set();start=time.time()
+ ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False);args=meta['args'];required=('s1_rbf_bins','t1_rbf_bins','condition_rbf_min','condition_rbf_max','condition_rbf_width_scale')
+ if not all(k in args for k in required):raise ValueError('checkpoint metadata predates configurable scalar RBF conditioning and is incompatible with this sampler')
+ model=JointKekuleDDPM(args['hidden'],32,len(meta['atom_map']),args['layers'],args.get('condition_dropout',.1),args['s1_rbf_bins'],args['t1_rbf_bins'],args['condition_rbf_min'],args['condition_rbf_max'],args['condition_rbf_width_scale']);model.load_state_dict(ck['model']);model.cuda().eval();diff=JointDiffusion().cuda();st=meta['condition_stats'];yn=torch.tensor([[(a.s1-st['s1_energy_mean'])/st['s1_energy_std'],(a.t1-st['t1_energy_mean'])/st['t1_energy_std']]],device='cuda');known=load_db(a.root);records=[];unique_mols=[];unique_smiles=set();start=time.time()
  for begin in range(0,a.num,a.batch_size):
   bs=min(a.batch_size,a.num-begin);sample=sample_batch(model,diff,yn.expand(bs,-1),bs,a.atoms,a.cfg)
   for j in range(bs):

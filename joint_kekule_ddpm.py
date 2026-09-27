@@ -16,11 +16,23 @@ from torch import nn
 CHARGE_MASK,HYDROGEN_MASK,RADICAL_MASK,BOND_MASK=5,5,3,4
 
 class ConditionEmbedding(nn.Module):
- def __init__(self,h=256,k=24):
-  super().__init__();c=torch.linspace(-5,5,k);self.register_buffer('centers',c);self.register_buffer('iw',1/(c[1]-c[0]));self.net=nn.Sequential(nn.Linear(2*k+10,h),nn.SiLU(),nn.Linear(h,h))
+ def __init__(self,h=256,s1_rbf_bins=24,t1_rbf_bins=24,rbf_min=-5.,rbf_max=5.,rbf_width_scale=1.):
+  super().__init__()
+  if s1_rbf_bins<2 or t1_rbf_bins<2:raise ValueError('S1/T1 RBF bins must each be at least 2')
+  if not math.isfinite(rbf_min) or not math.isfinite(rbf_max) or rbf_max<=rbf_min:raise ValueError('RBF range must be finite and increasing')
+  if not math.isfinite(rbf_width_scale) or rbf_width_scale<=0:raise ValueError('RBF width scale must be positive and finite')
+  s1=torch.linspace(rbf_min,rbf_max,s1_rbf_bins);t1=torch.linspace(rbf_min,rbf_max,t1_rbf_bins)
+  self.register_buffer('s1_centers',s1);self.register_buffer('t1_centers',t1)
+  self.register_buffer('s1_inv_width',torch.tensor(1./(float(s1[1]-s1[0])*rbf_width_scale)))
+  self.register_buffer('t1_inv_width',torch.tensor(1./(float(t1[1]-t1[0])*rbf_width_scale)))
+  self.rbf_min=float(rbf_min);self.rbf_max=float(rbf_max)
+  self.net=nn.Sequential(nn.Linear(s1_rbf_bins+t1_rbf_bins,h),nn.SiLU(),nn.Linear(h,h))
  def forward(self,y):
   if y.ndim!=2 or y.shape[1]!=2:raise ValueError('normalized S1/T1 must be [B,2]')
-  y=y.clamp(-12,12);rbf=torch.exp(-.5*((y[...,None]-self.centers)*self.iw).square());raw=torch.cat((y,y.square(),y.sin(),y.cos(),y.tanh()),-1);return self.net(torch.cat((rbf.flatten(1),raw),-1))
+  y=y.clamp(self.rbf_min,self.rbf_max)
+  s1=torch.exp(-.5*((y[:,0,None]-self.s1_centers)*self.s1_inv_width).square())
+  t1=torch.exp(-.5*((y[:,1,None]-self.t1_centers)*self.t1_inv_width).square())
+  return self.net(torch.cat((s1,t1),-1))
 
 class TimeEmbedding(nn.Module):
  def __init__(self,h):
@@ -38,8 +50,9 @@ class JointLayer(nn.Module):
 
 class JointKekuleDDPM(nn.Module):
  """Joint x0 categorical predictor and equivariant coordinate-epsilon head."""
- def __init__(self,hidden=256,max_atoms=32,atom_types=4,layers=8,condition_dropout=.1):
-  super().__init__();self.max_atoms=max_atoms;self.atom_types=atom_types;self.condition_dropout=condition_dropout;self.cond=ConditionEmbedding(hidden);self.null=nn.Parameter(torch.zeros(hidden));self.time=TimeEmbedding(hidden);self.ae=nn.Embedding(atom_types+1,hidden);self.qe=nn.Embedding(6,hidden);self.he=nn.Embedding(6,hidden);self.re=nn.Embedding(4,hidden);self.be=nn.Embedding(5,hidden);self.layers=nn.ModuleList(JointLayer(hidden) for _ in range(layers));self.count=nn.Linear(hidden,max_atoms+1);self.atom=nn.Linear(hidden,atom_types);self.charge=nn.Linear(hidden,5);self.hydrogen=nn.Linear(hidden,5);self.radical=nn.Linear(hidden,3);self.bond=nn.Linear(hidden,4);self.aromatic=nn.Linear(hidden,1);self.coord=nn.Sequential(nn.Linear(hidden+1,hidden),nn.SiLU(),nn.Linear(hidden,1,bias=False))
+ def __init__(self,hidden=256,max_atoms=32,atom_types=4,layers=8,condition_dropout=.1,
+              s1_rbf_bins=24,t1_rbf_bins=24,condition_rbf_min=-5.,condition_rbf_max=5.,condition_rbf_width_scale=1.):
+  super().__init__();self.max_atoms=max_atoms;self.atom_types=atom_types;self.condition_dropout=condition_dropout;self.cond=ConditionEmbedding(hidden,s1_rbf_bins,t1_rbf_bins,condition_rbf_min,condition_rbf_max,condition_rbf_width_scale);self.null=nn.Parameter(torch.zeros(hidden));self.time=TimeEmbedding(hidden);self.ae=nn.Embedding(atom_types+1,hidden);self.qe=nn.Embedding(6,hidden);self.he=nn.Embedding(6,hidden);self.re=nn.Embedding(4,hidden);self.be=nn.Embedding(5,hidden);self.layers=nn.ModuleList(JointLayer(hidden) for _ in range(layers));self.count=nn.Linear(hidden,max_atoms+1);self.atom=nn.Linear(hidden,atom_types);self.charge=nn.Linear(hidden,5);self.hydrogen=nn.Linear(hidden,5);self.radical=nn.Linear(hidden,3);self.bond=nn.Linear(hidden,4);self.aromatic=nn.Linear(hidden,1);self.coord=nn.Sequential(nn.Linear(hidden+1,hidden),nn.SiLU(),nn.Linear(hidden,1,bias=False))
  def context(self,y,t,unconditional=False):
   c=self.cond(y)
   if unconditional:c=self.null[None].expand_as(c)

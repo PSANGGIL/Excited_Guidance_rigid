@@ -68,10 +68,22 @@ class FPADiffusion(nn.Module):
         return clean @ so3_exp(sigma * omega), omega
 
     @torch.no_grad()
-    def p_coordinates(self, noisy: Tensor, eps: Tensor, t: Tensor, mask: Tensor):
+    def p_coordinates(self, noisy: Tensor, eps: Tensor, t: Tensor, mask: Tensor,
+                      score_clip: float | None = None, state_clip: float | None = None):
+        # Keep reverse geometry in fp32: an overflowing score otherwise
+        # contaminates every categorical head on the next denoiser call.
+        original_dtype = noisy.dtype
+        noisy, eps = noisy.float(), eps.float()
+        if score_clip is not None:
+            norm = eps.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            eps = eps * (float(score_clip) / norm).clamp_max(1.)
         beta=extract(self.beta,t,noisy.ndim);alpha=extract(self.alpha,t,noisy.ndim);abar=extract(self.abar,t,noisy.ndim)
         mean=(noisy-beta*eps/(1-abar).sqrt().clamp_min(1e-6))/alpha.sqrt();var=beta*(1-extract(self.abar_prev,t,noisy.ndim))/(1-abar).clamp_min(1e-8)
-        nz=(t>0).reshape((len(t),)+(1,)*(noisy.ndim-1));return (mean+nz*var.sqrt()*torch.randn_like(noisy))*mask.unsqueeze(-1)
+        nz=(t>0).reshape((len(t),)+(1,)*(noisy.ndim-1))
+        out = mean+nz*var.sqrt()*torch.randn_like(noisy)
+        if state_clip is not None:
+            out = out.clamp(-float(state_clip), float(state_clip))
+        return (out*mask.unsqueeze(-1)).to(original_dtype)
 
     @torch.no_grad()
     def p_frames(self, noisy: Tensor, omega: Tensor, t: Tensor, mask: Tensor):

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "dataset_type": "hp1kg_nevpt2",
+  "source_csv": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/data/hp1kg-21m81/BenchmarkSet1500.csv",
+  "atom_map": [
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "Si",
+    "P",
+    "S",
+    "Cl",
+    "As",
+    "Se",
+    "Br"
+  ],
+  "condition_stats": {
+    "mode": "s1_t1",
+    "s1_energy_mean": 3.640037775039673,
+    "s1_energy_std": 1.0043041706085205,
+    "t1_energy_mean": 3.1114675998687744,
+    "t1_energy_std": 0.9701360464096069
+  },
+  "splits": {
+    "train": 1264,
+    "val": 158,
+    "test": 159
+  },
+  "heavy_atom_min": 6,
+  "heavy_atom_max": 69,
+  "geometry_sources": {
+    "ETKDGv3+MMFF": 1423,
+    "ETKDGv3+UFF": 82,
+    "ETKDGv3": 74,
+    "RDKit2D_fallback": 2
+  },
+  "errors": [],
+  "retain_inverted_s1_t1": true,
+  "seed": 73
+}

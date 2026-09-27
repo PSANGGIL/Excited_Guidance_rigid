@@ -8,15 +8,28 @@ from .diffusion import SinusoidalTimeEmbedding
 from .fpa_diffusion_v2 import masked_center
 
 
+def template_free_representation_name(condition_mode, model_config):
+    kernels = int(model_config.get("condition_rbf_kernels", 1))
+    chirality = int(bool(model_config.get("chirality_enabled", False)))
+    return f"template_free_fpa_v7_bondaromatic_{condition_mode}_rbf{kernels}_chirality{chirality}"
+
+
 class EntityBlock(nn.Module):
-    def __init__(self, hidden: int, relations: int = 21):
+    def __init__(self, hidden: int, relations: int = 21, condition_film: bool = False):
         super().__init__()
         self.rel = nn.Embedding(relations, hidden)
         self.msg = nn.Sequential(nn.Linear(3*hidden+8, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
         self.up = nn.Sequential(nn.Linear(2*hidden, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
         self.norm = nn.LayerNorm(hidden)
+        self.condition_film = None
+        if condition_film:
+            self.condition_film = nn.Sequential(
+                nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, 2*hidden)
+            )
+            nn.init.zeros_(self.condition_film[-1].weight)
+            nn.init.zeros_(self.condition_film[-1].bias)
 
-    def forward(self, h, pos, frame, radius, kind, relation, mask):
+    def forward(self, h, pos, frame, radius, kind, relation, mask, condition):
         n = h.shape[1]
         pair = mask[:, :, None] & mask[:, None, :] & ~torch.eye(n, dtype=torch.bool, device=h.device)[None]
         delta = pos[:, :, None]-pos[:, None]
@@ -39,18 +52,35 @@ class EntityBlock(nn.Module):
         right = h[:, None].expand(-1, n, n, -1)
         message = self.msg(torch.cat((left, right, self.rel(relation), *geo), -1))*pair.unsqueeze(-1)
         degree = pair.sum(2, keepdim=True).clamp_min(1).to(h.dtype)
-        return self.norm(h+self.up(torch.cat((h, message.sum(2)/degree), -1)))*mask.unsqueeze(-1)
+        updated = self.norm(h+self.up(torch.cat((h, message.sum(2)/degree), -1)))
+        if self.condition_film is not None:
+            scale, shift = self.condition_film(condition).chunk(2, dim=-1)
+            updated = updated*(1+torch.tanh(scale[:, None]))+shift[:, None]
+        return updated*mask.unsqueeze(-1)
 
 
 class TemplateFreeFPAEntityDenoiser(nn.Module):
     def __init__(self, num_atom_types, atom_radii, hidden_dim=192, num_layers=8,
                  time_dim=64, condition_dim=120, condition_dropout=.2,
+                 condition_rbf_kernels=1, condition_rbf_min=-4., condition_rbf_max=4.,
+                 condition_film=False,
+                 chirality_enabled=False,
                  min_ring_size=3, max_ring_size=10, max_atoms=128, max_cells=32,
                  charge_min=-2, charge_max=2):
         super().__init__()
         self.num_atom_types = num_atom_types
         self.max_atoms, self.max_cells = max_atoms, max_cells
         self.condition_dim, self.condition_dropout = condition_dim, condition_dropout
+        self.chirality_enabled = bool(chirality_enabled)
+        self.condition_rbf_kernels = int(condition_rbf_kernels)
+        if self.condition_rbf_kernels < 1:
+            raise ValueError("condition_rbf_kernels must be positive")
+        if self.condition_rbf_kernels > 1:
+            centers = torch.linspace(condition_rbf_min, condition_rbf_max, self.condition_rbf_kernels)
+            spacing = (centers[1]-centers[0]).abs().clamp_min(1e-6)
+            self.register_buffer("condition_rbf_centers", centers)
+            self.register_buffer("condition_rbf_inv_width", spacing.reciprocal())
+        condition_feature_dim = condition_dim*self.condition_rbf_kernels
         self.charge_min = charge_min
         self.num_charges = charge_max-charge_min+1
         self.min_ring_size, self.max_ring_size = min_ring_size, max_ring_size
@@ -59,6 +89,7 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
         self.charge_mask_token = self.num_charges
         self.hydrogen_mask_token = 5
         self.radical_mask_token = 3
+        self.chirality_mask_token = 3
         self.size_mask_token, self.size_pad_token = self.num_ring_sizes, self.num_ring_sizes+1
         self.aromatic_mask_token = 2
         self.relation_mask_token = 12
@@ -67,18 +98,21 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
         self.charge_emb = nn.Embedding(self.num_charges+1, h)
         self.hydrogen_emb = nn.Embedding(6, h)
         self.radical_emb = nn.Embedding(4, h)
+        self.chirality_emb = nn.Embedding(4, h)
         self.size_emb = nn.Embedding(self.num_ring_sizes+2, h)
         self.aromatic_emb = nn.Embedding(3, h)
         self.kind_emb = nn.Embedding(2, h)
         self.time = SinusoidalTimeEmbedding(time_dim)
-        self.atom_in = nn.Sequential(nn.Linear(5*h+time_dim+1, h), nn.SiLU(), nn.Linear(h, h))
+        self.atom_in = nn.Sequential(nn.Linear(6*h+time_dim+1, h), nn.SiLU(), nn.Linear(h, h))
         self.cell_in = nn.Sequential(nn.Linear(3*h+time_dim+1, h), nn.SiLU(), nn.Linear(h, h))
-        self.cond = nn.Sequential(nn.Linear(condition_dim, h), nn.SiLU(), nn.Linear(h, h))
-        self.blocks = nn.ModuleList(EntityBlock(h) for _ in range(num_layers))
+        self.cond = nn.Sequential(nn.Linear(condition_feature_dim, h), nn.SiLU(), nn.Linear(h, h))
+        self.blocks = nn.ModuleList(EntityBlock(h, condition_film=condition_film) for _ in range(num_layers))
         self.atom_type = nn.Linear(h, num_atom_types)
         self.charge = nn.Linear(h, self.num_charges)
         self.hydrogen = nn.Linear(h, 5)
         self.radical = nn.Linear(h, 3)
+        self.chiral_neighbor_weight = nn.Linear(h, 3)
+        self.chirality = nn.Sequential(nn.Linear(h+1, h), nn.SiLU(), nn.Linear(h, 3))
         self.cell_size = nn.Linear(h, self.num_ring_sizes)
         self.cell_aromatic = nn.Linear(h, 2)
         self.radius_eps = nn.Linear(h, 1)
@@ -86,10 +120,11 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
         self.coord_pair = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 1, bias=False))
         self.cell_coord_pair = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 1, bias=False))
         self.bond = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 5))
+        self.bond_aromatic = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 2))
         self.relation = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 12))
         self.member = nn.Sequential(nn.Linear(2*h+2, h), nn.SiLU(), nn.Linear(h, 2))
-        self.atom_count = nn.Sequential(nn.Linear(condition_dim, h), nn.SiLU(), nn.Linear(h, max_atoms+1))
-        self.cell_count = nn.Sequential(nn.Linear(condition_dim, h), nn.SiLU(), nn.Linear(h, max_cells+1))
+        self.atom_count = nn.Sequential(nn.Linear(condition_feature_dim, h), nn.SiLU(), nn.Linear(h, max_atoms+1))
+        self.cell_count = nn.Sequential(nn.Linear(condition_feature_dim, h), nn.SiLU(), nn.Linear(h, max_cells+1))
         radii = torch.as_tensor(atom_radii, dtype=torch.float32)
         self.register_buffer("atom_radii", torch.cat((radii, radii.mean()[None], radii.mean()[None])), persistent=False)
 
@@ -102,6 +137,22 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
     def charge_index(self, charge):
         return (charge-self.charge_min).clamp(0, self.num_charges-1)
 
+    def encode_condition(self, condition, drop=None):
+        if condition.ndim != 2 or condition.shape[-1] != self.condition_dim:
+            raise ValueError(f"condition must have shape [B,{self.condition_dim}]")
+        if self.condition_rbf_kernels == 1:
+            encoded = condition
+        else:
+            delta = (condition.unsqueeze(-1)-self.condition_rbf_centers)*self.condition_rbf_inv_width
+            encoded = torch.exp(-.5*delta.square()).flatten(1)
+        if drop is not None:
+            encoded = encoded*(~drop).to(encoded.dtype).unsqueeze(-1)
+        return encoded
+
+    def count_logits(self, condition, drop=None):
+        encoded = self.encode_condition(condition, drop)
+        return self.atom_count(encoded), self.cell_count(encoded)
+
     @staticmethod
     def pair(h1, h2, p1, p2):
         d = (p1[:, :, None]-p2[:, None]).norm(dim=-1, keepdim=True)
@@ -110,20 +161,19 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
 
     def forward(self, atom_types, charges, hydrogens, radicals, atom_pos, atom_bonds, atom_mask,
                 cell_sizes, cell_aromatic, cell_pos, cell_frames, cell_radius, cell_relations,
-                membership, cell_mask, t, condition, drop=None):
+                membership, cell_mask, t, condition, drop=None, chirality=None):
         b, na = atom_types.shape
         nc = cell_sizes.shape[1]
         te = self.time(t)
         atom_radius = self.atom_radii[atom_types].unsqueeze(-1)
-        atom_h = self.atom_in(torch.cat((self.atom_emb(atom_types), self.charge_emb(charges), self.hydrogen_emb(hydrogens), self.radical_emb(radicals),
+        chirality = torch.zeros_like(atom_types) if chirality is None or not self.chirality_enabled else chirality
+        atom_h = self.atom_in(torch.cat((self.atom_emb(atom_types), self.charge_emb(charges), self.hydrogen_emb(hydrogens), self.radical_emb(radicals), self.chirality_emb(chirality),
             self.kind_emb.weight[0][None, None].expand(b, na, -1),
             te[:, None].expand(-1, na, -1), atom_radius), -1))
         cell_h = self.cell_in(torch.cat((self.size_emb(cell_sizes), self.aromatic_emb(cell_aromatic),
             self.kind_emb.weight[1][None, None].expand(b, nc, -1),
             te[:, None].expand(-1, nc, -1), cell_radius.unsqueeze(-1)), -1))
-        condition_input = condition.to(atom_h.dtype)
-        if drop is not None:
-            condition_input = condition_input*(~drop).to(condition_input.dtype).unsqueeze(-1)
+        condition_input = self.encode_condition(condition.to(atom_h.dtype), drop)
         condition_h = self.cond(condition_input)
         atom_h, cell_h = atom_h+condition_h[:, None], cell_h+condition_h[:, None]
         h = torch.cat((atom_h*atom_mask.unsqueeze(-1), cell_h*cell_mask.unsqueeze(-1)), 1)
@@ -139,18 +189,35 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
         rel[:, na:, :na] = torch.where(membership.eq(1), 6, torch.where(membership.eq(2), 7, 0))
         rel[:, :na, na:] = rel[:, na:, :na].transpose(1, 2)
         for block in self.blocks:
-            h = block(h, pos, frame, radius, kind, rel, mask)
+            h = block(h, pos, frame, radius, kind, rel, mask, condition_h)
         atom_h, cell_h = h[:, :na], h[:, na:]
+        atom_pair_mask = atom_mask[:, :, None] & atom_mask[:, None, :]
+        atom_pair_mask &= ~torch.eye(na, dtype=torch.bool, device=h.device)[None]
+        atom_delta = atom_pos[:, :, None]-atom_pos[:, None]
+        atom_distance = atom_delta.norm(dim=-1)
+        neighbor_logits = self.chiral_neighbor_weight(atom_h)[:, None].expand(-1, na, -1, -1)
+        neighbor_logits = neighbor_logits-atom_distance[..., None]
+        neighbor_logits = neighbor_logits.masked_fill(~atom_pair_mask[..., None], -1e4)
+        neighbor_weight = neighbor_logits.softmax(2)*atom_pair_mask[..., None]
+        neighbor_vectors = (neighbor_weight[..., None]*atom_delta[..., None, :]).sum(2)
+        signed_volume = (neighbor_vectors[:, :, 0]*torch.linalg.cross(
+            neighbor_vectors[:, :, 1], neighbor_vectors[:, :, 2], dim=-1)).sum(-1, keepdim=True)
+        scale = neighbor_vectors.square().sum(-1).sum(-1, keepdim=True).pow(1.5).clamp_min(1e-6)
+        chirality_logits = self.chirality(torch.cat((atom_h, signed_volume/scale), -1))
         aa = self.pair(atom_h, atom_h, atom_pos, atom_pos)
         cc = self.pair(cell_h, cell_h, cell_pos, cell_pos)
         ca = self.pair(cell_h, atom_h, cell_pos, atom_pos)
         bond_logits = self.bond(aa); bond_logits = (bond_logits+bond_logits.transpose(1, 2))/2
+        bond_aromatic_logits = self.bond_aromatic(aa); bond_aromatic_logits = (bond_aromatic_logits+bond_aromatic_logits.transpose(1, 2))/2
+        if not self.chirality_enabled:
+            chirality_logits = torch.zeros_like(chirality_logits); chirality_logits[..., 0] = 20.
         relation_logits = self.relation(cc); relation_logits = (relation_logits+relation_logits.transpose(1, 2))/2
-        atom_delta = atom_pos[:, :, None]-atom_pos[:, None]
         atom_weight = self.coord_pair(aa); atom_weight = (atom_weight+atom_weight.transpose(1, 2))/2
-        atom_eps = masked_center((atom_delta*atom_weight).sum(2), atom_mask)
+        atom_eps = masked_center((atom_delta*atom_weight*atom_pair_mask.unsqueeze(-1)).sum(2), atom_mask)
         all_delta = cell_pos[:, :, None]-pos[:, None]
-        cell_eps = (all_delta*self.cell_coord_pair(self.pair(cell_h, h, cell_pos, pos))).sum(2)/mask.sum(1)[:, None, None].clamp_min(1)
+        cell_pair_mask = cell_mask[:, :, None] & mask[:, None, :]
+        cell_weight = self.cell_coord_pair(self.pair(cell_h, h, cell_pos, pos))
+        cell_eps = (all_delta*cell_weight*cell_pair_mask.unsqueeze(-1)).sum(2)/mask.sum(1)[:, None, None].clamp_min(1)
         cell_eps = cell_eps*cell_mask.unsqueeze(-1)
         coeff = self.omega_coeff(cell_h)
         rotation_score = (cell_frames*coeff[..., :, None]).sum(-2)*cell_mask.unsqueeze(-1)
@@ -160,7 +227,9 @@ class TemplateFreeFPAEntityDenoiser(nn.Module):
             "rotation_score": rotation_score,
             "atom_type_logits": self.atom_type(atom_h), "charge_logits": self.charge(atom_h),
             "hydrogen_logits": self.hydrogen(atom_h), "radical_logits": self.radical(atom_h),
-            "bond_logits": bond_logits, "cell_size_logits": self.cell_size(cell_h),
+            "chirality_logits": chirality_logits, "bond_logits": bond_logits,
+            "bond_aromatic_logits": bond_aromatic_logits,
+            "cell_size_logits": self.cell_size(cell_h),
             "cell_aromatic_logits": self.cell_aromatic(cell_h),
             "relation_logits": relation_logits, "membership_logits": self.member(ca),
             "atom_count_logits": self.atom_count(condition_input), "cell_count_logits": self.cell_count(condition_input),

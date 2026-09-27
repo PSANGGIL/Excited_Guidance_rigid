@@ -68,7 +68,9 @@ class JointKekuleDDPM(nn.Module):
 class JointDiffusion(nn.Module):
  def __init__(self,timesteps=500,beta_start=1e-4,beta_end=.05,marginals=None):
   super().__init__();beta=torch.linspace(beta_start,beta_end,timesteps);alpha=1-beta;self.timesteps=timesteps;self.register_buffer("beta",beta);self.register_buffer("alpha",alpha);self.register_buffer("abar",alpha.cumprod(0));marginals=marginals or {}
-  defaults={"atom":torch.ones(1),"charge":torch.ones(5),"hydrogen":torch.ones(5),"radical":torch.ones(3),"edge":torch.ones(2),"bond_type":torch.ones(3)}
+  # ``aromatic_edge`` becomes a first-class categorical state in v6. The
+  # default is backward compatible: v1-v5 never request this kernel.
+  defaults={"atom":torch.ones(1),"charge":torch.ones(5),"hydrogen":torch.ones(5),"radical":torch.ones(3),"edge":torch.ones(2),"bond_type":torch.ones(3),"aromatic_edge":torch.ones(2),"joint_edge":torch.ones(7)}
   for name,default in defaults.items():
    value=torch.as_tensor(marginals.get(name,default),dtype=torch.float32);value=(value+1e-8)/(value+1e-8).sum();self.register_buffer(name+"_marginal",value)
  def at(self,v,t,nd):return v[t].reshape((len(t),)+(1,)*(nd-1))

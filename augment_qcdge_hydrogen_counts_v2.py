@@ -77,17 +77,26 @@ def mapped_atom_states(group):
     hydrogens = torch.tensor([smiles_mol.GetAtomWithIdx(mapping[index]).GetTotalNumHs(includeNeighbors=True) for index in range(coordinate_mol.GetNumAtoms())], dtype=torch.uint8)
     radicals = torch.tensor([smiles_mol.GetAtomWithIdx(mapping[index]).GetNumRadicalElectrons() for index in range(coordinate_mol.GetNumAtoms())], dtype=torch.uint8)
     charges = torch.tensor([smiles_mol.GetAtomWithIdx(mapping[index]).GetFormalCharge() for index in range(coordinate_mol.GetNumAtoms())], dtype=torch.int8)
+    Chem.AssignStereochemistry(smiles_mol, cleanIt=True, force=True)
+    # CIP R/S labels are invariant to the atom-index permutation introduced by
+    # graph isomorphism; raw CW/CCW tags are not.
+    aromatic_atoms = torch.tensor([smiles_mol.GetAtomWithIdx(mapping[index]).GetIsAromatic()
+        for index in range(coordinate_mol.GetNumAtoms())], dtype=torch.bool)
+    chirality = torch.tensor([1 if smiles_mol.GetAtomWithIdx(mapping[index]).HasProp("_CIPCode") and smiles_mol.GetAtomWithIdx(mapping[index]).GetProp("_CIPCode") == "R" else
+        2 if smiles_mol.GetAtomWithIdx(mapping[index]).HasProp("_CIPCode") and smiles_mol.GetAtomWithIdx(mapping[index]).GetProp("_CIPCode") == "S" else 0
+        for index in range(coordinate_mol.GetNumAtoms())], dtype=torch.uint8)
     bond_map = {}
     for bond in coordinate_mol.GetBonds():
         i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(); other = smiles_mol.GetBondBetweenAtoms(mapping[i], mapping[j])
         bond_map[tuple(sorted((i, j)))] = 4 if other.GetIsAromatic() else int(round(other.GetBondTypeAsDouble()))
-    return hydrogens, radicals, charges, bond_map
+    return hydrogens, radicals, charges, chirality, aromatic_atoms, bond_map
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, default=Path("data_qcdge_a10_full"))
     parser.add_argument("--source", type=Path); parser.add_argument("--split")
+    parser.add_argument("--output-dir", default="hydrogen_counts_v3_chirality")
     parser.add_argument("--max-shards", type=int)
     args = parser.parse_args(); manifest = json.loads((args.data/"manifest.json").read_text())
     source = args.source or Path(manifest["source_file"])
@@ -97,25 +106,30 @@ def main():
             paths = split["shards"][:args.max_shards] if args.max_shards else split["shards"]
             for rel in paths:
                 raw = torch.load(args.data/rel, map_location="cpu", weights_only=False)
-                chunks = []; radical_chunks = []; charge_chunks = []; bond_chunks = []; masks = []; errors = []
+                chunks = []; radical_chunks = []; charge_chunks = []; chiral_chunks = []; aromatic_chunks = []; bond_chunks = []; masks = []; errors = []
                 for row, molecule_id in enumerate(raw["molecule_ids"]):
                     a, b = map(int, raw["atom_offsets"][row:row+2]); ba, bb = map(int, raw["bond_offsets"][row:row+2])
                     try:
-                        values, radical_values, charges, bond_map = mapped_atom_states(h5[str(molecule_id)])
+                        values, radical_values, charges, chirality, aromatic_atoms, bond_map = mapped_atom_states(h5[str(molecule_id)])
                         mapped_bonds = torch.tensor([bond_map[tuple(sorted(map(int, edge)))] for edge in raw["bond_indices"][ba:bb]], dtype=torch.uint8)
-                        chunks.append(values); radical_chunks.append(radical_values); charge_chunks.append(charges); bond_chunks.append(mapped_bonds); masks.append(torch.ones_like(values, dtype=torch.bool))
+                        chunks.append(values); radical_chunks.append(radical_values); charge_chunks.append(charges); chiral_chunks.append(chirality); aromatic_chunks.append(aromatic_atoms); bond_chunks.append(mapped_bonds); masks.append(torch.ones_like(values, dtype=torch.bool))
                     except Exception as exc:
-                        chunks.append(torch.zeros(b-a, dtype=torch.uint8)); radical_chunks.append(torch.zeros(b-a, dtype=torch.uint8)); charge_chunks.append(raw["atom_charges"][a:b].to(torch.int8)); bond_chunks.append(raw["bond_types"][ba:bb].to(torch.uint8)); masks.append(torch.zeros(b-a, dtype=torch.bool))
+                        chunks.append(torch.zeros(b-a, dtype=torch.uint8)); radical_chunks.append(torch.zeros(b-a, dtype=torch.uint8)); charge_chunks.append(raw["atom_charges"][a:b].to(torch.int8)); chiral_chunks.append(torch.zeros(b-a,dtype=torch.uint8)); aromatic_chunks.append(torch.zeros(b-a,dtype=torch.bool)); bond_chunks.append(raw["bond_types"][ba:bb].to(torch.uint8)); masks.append(torch.zeros(b-a, dtype=torch.bool))
                         errors.append({"row": row, "molecule_id": str(molecule_id), "error": str(exc)})
                 counts = torch.cat(chunks) if chunks else torch.empty(0, dtype=torch.uint8)
                 radicals = torch.cat(radical_chunks) if radical_chunks else torch.empty(0, dtype=torch.uint8)
                 charges = torch.cat(charge_chunks) if charge_chunks else torch.empty(0, dtype=torch.int8)
                 bonds = torch.cat(bond_chunks) if bond_chunks else torch.empty(0, dtype=torch.uint8)
+                chirality = torch.cat(chiral_chunks) if chiral_chunks else torch.empty(0, dtype=torch.uint8)
+                aromatic_atoms = torch.cat(aromatic_chunks) if aromatic_chunks else torch.empty(0, dtype=torch.bool)
                 valid = torch.cat(masks) if masks else torch.empty(0, dtype=torch.bool)
                 if len(counts) != int(raw["atom_offsets"][-1]): raise RuntimeError(f"atom alignment mismatch: {rel}")
                 if len(bonds) != int(raw["bond_offsets"][-1]): raise RuntimeError(f"bond alignment mismatch: {rel}")
-                target = args.data/"hydrogen_counts"/rel; target.parent.mkdir(parents=True, exist_ok=True)
-                torch.save({"atom_hydrogens": counts, "atom_radicals": radicals, "atom_formal_charges": charges, "bond_types": bonds, "atom_hydrogen_mask": valid, "atom_offsets": raw["atom_offsets"], "bond_offsets": raw["bond_offsets"], "errors": errors}, target)
+                target = args.data/args.output_dir/rel; target.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({"atom_hydrogens": counts, "atom_radicals": radicals, "atom_formal_charges": charges,
+                    "atom_chirality": chirality, "atom_aromatic": aromatic_atoms, "bond_types": bonds,
+                    "atom_hydrogen_mask": valid, "atom_offsets": raw["atom_offsets"],
+                    "bond_offsets": raw["bond_offsets"], "errors": errors}, target)
                 print(json.dumps({"shard": rel, "atoms": len(counts), "errors": len(errors), "output": str(target)}), flush=True)
 
 
