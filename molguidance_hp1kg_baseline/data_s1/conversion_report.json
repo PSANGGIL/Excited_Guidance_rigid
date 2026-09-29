@@ -1,0 +1,80 @@
+{
+  "atom_map": [
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "Si",
+    "P",
+    "S",
+    "Cl",
+    "As",
+    "Se",
+    "Br"
+  ],
+  "edge_classes": [
+    "NO_BOND",
+    "SINGLE",
+    "DOUBLE",
+    "TRIPLE",
+    "AROMATIC"
+  ],
+  "limitations": [
+    "The unmodified MolGuidance condition embedder accepts one scalar; this export uses only the selected S1 or T1 property.",
+    "The source tensors contain heavy atoms only; stored hydrogen counts are not node targets in the official schema.",
+    "The official schema has no radical-electron target; affected source molecules are counted in this report."
+  ],
+  "official_code_changes": 0,
+  "output": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_s1",
+  "property": "s1",
+  "source": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/joint_kekule_diffusion/data_hp1kg_nevpt2",
+  "source_manifest_sha256": "05037d8d5adbac9080b8d678139d5c36a0a31977d9fd2e685ff9897de3941768",
+  "source_split_sha256": {
+    "test": "64228025101e1bbb3943b19134035e8ac5716f5eb4b7eeaba979980e2c0bca9d",
+    "train": "ff38afc9f66c1954ec19b116ce8eb184a32a36882eab609b412c32a0b38de37c",
+    "val": "e03fdb0dd961c4719ede623a60b68c9fe254d527711d2a1fcd21a5d2ee61f9fd"
+  },
+  "splits": {
+    "test": {
+      "aromatic_molecules": 141,
+      "atom_count_max": 62,
+      "atom_count_min": 7,
+      "atoms": 4395,
+      "atoms_with_implicit_hydrogen_not_explicit_nodes": 2287,
+      "bonds": 4824,
+      "implicit_hydrogens_not_explicit_nodes": 3218,
+      "molecules": 159,
+      "property_mean": 3.496849298477173,
+      "property_std": 0.8280226588249207,
+      "radical_molecules_unsupported_by_official_schema": 0
+    },
+    "train": {
+      "aromatic_molecules": 1086,
+      "atom_count_max": 69,
+      "atom_count_min": 6,
+      "atoms": 33346,
+      "atoms_with_implicit_hydrogen_not_explicit_nodes": 17008,
+      "bonds": 36379,
+      "implicit_hydrogens_not_explicit_nodes": 24707,
+      "molecules": 1264,
+      "property_mean": 3.640037775039673,
+      "property_std": 1.0043041706085205,
+      "radical_molecules_unsupported_by_official_schema": 0
+    },
+    "val": {
+      "aromatic_molecules": 135,
+      "atom_count_max": 58,
+      "atom_count_min": 8,
+      "atoms": 4320,
+      "atoms_with_implicit_hydrogen_not_explicit_nodes": 2175,
+      "bonds": 4712,
+      "implicit_hydrogens_not_explicit_nodes": 3249,
+      "molecules": 158,
+      "property_mean": 3.576310157775879,
+      "property_std": 0.9485761523246765,
+      "radical_molecules_unsupported_by_official_schema": 0
+    }
+  },
+  "train_alias_policy": "train_a=train_b=train (full existing train split)"
+}

@@ -25,6 +25,7 @@ def prepare_strict(source: Path, output: Path, seed: int):
         "hydrogen_policy": "single_Chem.AddHs_without_SMILES_roundtrip",
         "require_closed_shell": True,
         "require_net_charge_zero": True,
+        "etkdg_timeout_seconds_per_attempt": 15,
     }
     if manifest.exists() and any(output.glob("generated_*.sdf")):
         if not config_path.exists() or json.loads(config_path.read_text()) != config:
@@ -56,13 +57,23 @@ def prepare_strict(source: Path, output: Path, seed: int):
                 raise ValueError(f"open-shell molecule rejected before xTB: UHF={uhf}")
             smiles = Chem.MolToSmiles(base, canonical=True, isomericSmiles=False)
             # This is the only heavy->explicit-H conversion in the v5 path.
-            molecule_3d = Chem.AddHs(base, explicitOnly=False, addCoords=False)
-            params = AllChem.ETKDGv3()
-            params.randomSeed = seed + index
-            params.useRandomCoords = True
-            params.maxIterations = 1000
-            if AllChem.EmbedMolecule(molecule_3d, params) != 0:
-                raise ValueError("ETKDGv3 failed")
+            molecule_3d = None
+            for attempt in range(8):
+                candidate = Chem.AddHs(
+                    base, explicitOnly=False, addCoords=False,
+                )
+                params = AllChem.ETKDGv3()
+                params.randomSeed = seed + index + attempt * 104729
+                params.useRandomCoords = True
+                params.maxIterations = 1000 if attempt == 0 else 5000
+                params.boxSizeMult = 2.0 + 0.5 * attempt
+                params.numThreads = 1
+                params.timeout = 15
+                if AllChem.EmbedMolecule(candidate, params) == 0:
+                    molecule_3d = candidate
+                    break
+            if molecule_3d is None:
+                raise ValueError("ETKDGv3 failed after 8 seeded attempts")
             if AllChem.MMFFHasAllMoleculeParams(molecule_3d):
                 AllChem.MMFFOptimizeMolecule(molecule_3d, maxIters=1000)
             elif AllChem.UFFHasAllMoleculeParams(molecule_3d):
@@ -114,8 +125,8 @@ def main():
     parser.add_argument("--target-t1", type=float, required=True)
     parser.add_argument("--seed", type=int, default=20260918)
     args = parser.parse_args()
-    if args.workers != 4 or args.threads != 1:
-        raise ValueError("required setting is 4 workers x 1 thread")
+    if args.workers < 1 or args.threads != 1:
+        raise ValueError("workers must be positive and threads must remain 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     inputs = args.output_dir / "inputs"
     work = args.output_dir / "work"
@@ -130,7 +141,7 @@ def main():
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         environment[key] = "1"
     started = time.time()
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_one, path, work, environment): path for path in files}
         with (work / "progress.jsonl").open("a") as progress:
             for completed, future in enumerate(as_completed(futures), 1):
