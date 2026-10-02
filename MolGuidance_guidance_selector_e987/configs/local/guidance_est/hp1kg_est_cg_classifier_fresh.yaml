@@ -1,0 +1,68 @@
+dataset:
+  atom_map:
+  - B
+  - C
+  - N
+  - O
+  - F
+  - Si
+  - P
+  - S
+  - Cl
+  - As
+  - Se
+  - Br
+  dataset_name: qme14s
+  processed_data_dir: ../molguidance_hp1kg_baseline/data_est
+  raw_data_dir: ../joint_kekule_diffusion/data_hp1kg_nevpt2
+  conditioning:
+    enabled: true
+    property: est
+    normalize: true
+  use_first_half_training_set: false
+model:
+  scalar_size: 256
+  vector_size: 16
+  n_tasks: 1
+  num_layers: 3
+  dropout: 0.0
+  pooling_type: mean
+  n_atom_types: 12
+  n_charge_types: 6
+training:
+  output_dir: ../runs/molguidance_guidance_est_20261001/cg_classifier
+  batch_size: 32
+  num_workers: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+  loss_type: l1
+  time_conditioning: true
+  trainer_args:
+    accelerator: gpu
+    accumulate_grad_batches: 1
+    devices: 1
+    gradient_clip_val: 1.0
+    max_epochs: 1000
+    num_nodes: 1
+mol_fm:
+  parameterization: ctmc
+  prior_config:
+    a:
+      align: false
+      kwargs: {}
+      type: ctmc
+    c:
+      align: false
+      kwargs: {}
+      type: ctmc
+    e:
+      align: false
+      kwargs: {}
+      type: ctmc
+    x:
+      align: true
+      kwargs:
+        std: 1.0
+      type: centered-normal

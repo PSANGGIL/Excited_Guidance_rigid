@@ -1,0 +1,118 @@
+checkpointing:
+  every_n_epochs: 1
+  monitor: val_total_loss
+  save_last: true
+  save_top_k: 3
+dataset:
+  atom_map:
+  - B
+  - C
+  - N
+  - O
+  - F
+  - Si
+  - P
+  - S
+  - Cl
+  - As
+  - Se
+  - Br
+  conditioning:
+    enabled: true
+    normalize: true
+    property: est
+  dataset_name: qme14s
+  dataset_size: null
+  processed_data_dir: ../molguidance_hp1kg_baseline/data_est
+  raw_data_dir: ../joint_kekule_diffusion/data_hp1kg_nevpt2
+  use_first_half_training_set: false
+interpolant_scheduler:
+  cosine_params:
+    a: 2
+    c: 2
+    e: 1.5
+    x: 1
+  schedule_type:
+    a: linear
+    c: linear
+    e: linear
+    x: linear
+lr_scheduler:
+  base_lr: 0.00025
+  restart_interval: 0
+  restart_type: linear
+  warmup_length: 0.0
+  weight_decay: 1.0e-12
+model_setting:
+  gaussian_expansion:
+    enabled: false
+    n_gaussians: 5
+  properties_handle_method: concatenate_sum
+  property_embedding_dim: 256
+mol_fm:
+  parameterization: ctmc
+  prior_config:
+    a:
+      align: false
+      kwargs: {}
+      type: ctmc
+    c:
+      align: false
+      kwargs: {}
+      type: ctmc
+    e:
+      align: false
+      kwargs: {}
+      type: ctmc
+    x:
+      align: true
+      kwargs:
+        std: 1.0
+      type: centered-normal
+  time_scaled_loss: true
+  total_loss_weights:
+    a: 0.4
+    c: 1.0
+    e: 2.0
+    x: 3.0
+training:
+  batch_size: 32
+  evaluation:
+    mols_to_sample: 32
+    sample_interval: 1.0
+    val_loss_interval: 1.0
+  max_num_edges: 400000.0
+  num_workers: 4
+  output_dir: ../runs/molguidance_guidance_est_20261001/base_good
+  trainer_args:
+    accelerator: gpu
+    accumulate_grad_batches: 1
+    devices: 1
+    gradient_clip_algorithm: value
+    gradient_clip_val: 1.0
+    limit_val_batches: 1.0
+    max_epochs: 2000
+    num_nodes: 1
+    strategy: auto
+vector_field:
+  convs_per_update: 1
+  high_confidence_threshold: 0.0
+  message_norm: 100
+  n_cp_feats: 4
+  n_hidden_edge_feats: 128
+  n_hidden_scalars: 256
+  n_message_gvps: 3
+  n_molecule_updates: 8
+  n_recycles: 1
+  n_update_gvps: 3
+  n_vec_channels: 16
+  rbf_dim: 32
+  rbf_dmax: 14
+  separate_mol_updaters: true
+  stochasticity: 10.0
+  update_edge_w_distance: true
+wandb:
+  mode: offline
+  name: hp1kg-est-base-good-fresh
+  project: mol-fm
+  save_dir: ../runs/molguidance_guidance_est_20261001/base_good
