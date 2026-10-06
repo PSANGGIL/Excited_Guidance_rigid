@@ -15,6 +15,25 @@ import numpy as np
 import random
 
 
+def _mg_feature_slices(feat: str, node_counts: List[int]) -> List[slice]:
+    """Return graph-local slices into a packed MG feature tensor.
+
+    Node features contribute ``n`` entries per graph. Edge logits and targets are
+    packed over the undirected upper triangle, so they contribute ``n * (n - 1)
+    // 2`` entries. Keeping this calculation in one place prevents an edge tensor
+    from accidentally being indexed with node offsets.
+    """
+    slices = []
+    offset = 0
+    for num_nodes in node_counts:
+        if num_nodes < 0:
+            raise ValueError(f"num_nodes must be non-negative, got {num_nodes}")
+        span = num_nodes * (num_nodes - 1) // 2 if feat == 'e' else num_nodes
+        slices.append(slice(offset, offset + span))
+        offset += span
+    return slices
+
+
 class ModelGuidance(FlowMol):
     """
     Extended FlowMol model with Model Guidance capabilities, based on the paper
@@ -112,10 +131,15 @@ class ModelGuidance(FlowMol):
 
         return total_loss
 
-    def on_after_optimizer_step(self):
-        # Update EMA after optimization
-        ema_decay = 0.9999  # Decay rate for EMA
-        self.update_ema(self.ema_vector_field, self.vector_field, decay=ema_decay)   
+    def on_before_zero_grad(self, optimizer):
+        """Update the teacher EMA once after each optimizer step.
+
+        ``on_after_optimizer_step`` is not a PyTorch Lightning hook and was never
+        called. ``on_before_zero_grad`` runs after ``optimizer.step()`` and before
+        gradients are cleared, including when gradient accumulation is enabled.
+        """
+        ema_decay = 0.9999
+        self.update_ema(self.ema_vector_field, self.vector_field, decay=ema_decay)
 
     def validation_step(self, g: dgl.DGLGraph, batch_idx: int):
         # compute losses
@@ -252,22 +276,29 @@ class ModelGuidance(FlowMol):
                 if use_mg_loss:
                     # Apply guidance to distributions
                     with torch.no_grad():
-                        total_nodes = 0
-                        for i in range(num_mg):
-                            graph = unbatched_graphs[i]
-                            num_nodes = graph.num_nodes()
+                        node_counts = [
+                            graph.num_nodes() for graph in unbatched_graphs[:num_mg]
+                        ]
+                        feature_slices = _mg_feature_slices(feat, node_counts)
+                        expected_items = vf_output_cond[feat].shape[0]
+                        covered_items = feature_slices[-1].stop if feature_slices else 0
+                        if covered_items != expected_items:
+                            raise RuntimeError(
+                                f"MG {feat!r} packing mismatch: slices cover "
+                                f"{covered_items} entries, teacher output has "
+                                f"{expected_items}"
+                            )
+
+                        for i, feature_indices in enumerate(feature_slices):
                             
                             if t[i] < self.mg_high:
                                 w_val = guidance_values[i] 
                                 if w_val > 0:
-                                    node_indices = slice(total_nodes, total_nodes + num_nodes)
-                                    guidance_diff = vf_output_cond[feat][node_indices] - vf_output_uncond[feat][node_indices]
+                                    guidance_diff = vf_output_cond[feat][feature_indices] - vf_output_uncond[feat][feature_indices]
                                     
                                     # Add guidance and renormalize
-                                    target[node_indices] = target[node_indices] + w_val * guidance_diff
-                                    target[node_indices] = F.softmax(target[node_indices], dim=-1)
-                            
-                            total_nodes += num_nodes
+                                    target[feature_indices] = target[feature_indices] + w_val * guidance_diff
+                                    target[feature_indices] = F.softmax(target[feature_indices], dim=-1)
                 
                 # Convert to indices and handle masking
                 target = target.argmax(dim=-1)
@@ -1000,6 +1031,5 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             data_src[f'{feat}_1_pred'] = x_1_sampled
 
         return g
-
 
 
