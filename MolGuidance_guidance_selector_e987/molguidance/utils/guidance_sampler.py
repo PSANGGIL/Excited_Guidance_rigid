@@ -179,7 +179,7 @@ def _handle_categorical_feature(feat, good_model, bad_model, good_pred, bad_pred
     # Apply guidance in log space
     log_p_bad = torch.log(bad_pred[feat] + 1e-10)
     log_p_good = torch.log(good_pred[feat] + 1e-10)
-    p_s_1 = torch.exp(log_p_bad + guide_w[feat] * (log_p_good - log_p_bad))
+    p_s_1 = torch.exp(log_p_bad + guide_w.get(feat, guide_w.get('a', 1.0)) * (log_p_good - log_p_bad))
     p_s_1 = F.softmax(torch.log(p_s_1)/good_model.vector_field.cat_temp_func(t_i), dim=-1)
     
     # Campbell step
@@ -405,7 +405,7 @@ def sample_with_hybrid_guidance(good_model, bad_model, cfg_model, n_atoms,
                 g.ndata['x_t'] = g.ndata['x_t'] + (t[s_idx] - t[s_idx-1]) * vf
             else:
                 # Auto-guidance log probabilities with its weight
-                log_p_auto = torch.log(bad_pred[feat] + 1e-10) + auto_guide_w[feat] * (
+                log_p_auto = torch.log(bad_pred[feat] + 1e-10) + auto_guide_w.get(feat, auto_guide_w.get('a', 1.0)) * (
                     torch.log(good_pred[feat] + 1e-10) - torch.log(bad_pred[feat] + 1e-10)
                 )
                 # CFG log probabilities already include its weight

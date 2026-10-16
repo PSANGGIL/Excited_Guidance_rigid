@@ -69,6 +69,8 @@ def parse_arguments():
                         help="Guidance weight for atom types")
     parser.add_argument("--guide_w_c", type=float, default=2.0,
                         help="Guidance weight for charges")
+    parser.add_argument("--guide_w_h", type=float, default=None,
+                        help="Guidance weight for attached-H count (defaults to atom weight)")
     parser.add_argument("--guide_w_e", type=float, default=2.0,
                         help="Guidance weight for bonds")
 
@@ -123,6 +125,7 @@ def main():
         'x': args.guide_w_x,
         'a': args.guide_w_a,
         'c': args.guide_w_c,
+        'h': args.guide_w_a if args.guide_w_h is None else args.guide_w_h,
         'e': args.guide_w_e
     }
     print(f"Using guidance weights: {guide_w}\n")

@@ -44,7 +44,13 @@ def main() -> None:
         if mol is None:
             parse_failures.append(row)
             continue
-        rdDepictor.Compute2DCoords(mol)
+        try:
+            rdDepictor.Compute2DCoords(mol)
+        except Exception as exc:
+            failed = dict(row)
+            failed["depiction_error"] = f"{type(exc).__name__}: {exc}"
+            parse_failures.append(failed)
+            continue
         drawable.append((row, mol))
 
     page_paths: list[str] = []

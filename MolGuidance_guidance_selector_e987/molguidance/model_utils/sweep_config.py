@@ -9,7 +9,7 @@ def register_hyperparameter_args(p: argparse.ArgumentParser) -> argparse.Argumen
     p.add_argument('--warmup_length', type=float, default=None)
 
     # hyperparams which can be set for each feature
-    feats = ['x', 'a', 'c', 'e']
+    feats = ['x', 'a', 'c', 'h', 'e']
     for feat in feats:
         p.add_argument(f'--{feat}_loss_weight', type=float, default=None)
         p.add_argument(f'--{feat}_cos_param', type=float, default=None, help='cosine parameter for interpolation schedule')
@@ -57,7 +57,7 @@ def merge_config_and_args(config: dict, args: argparse.Namespace) -> dict:
         config['lr_scheduler']['warmup_length'] = args.warmup_length
 
     # hyperparams which can be set for each feature
-    feats = ['x', 'a', 'c', 'e']
+    feats = ['x', 'a', 'c', 'h', 'e']
     for feat in feats:
         if getattr(args, f'{feat}_loss_weight') is not None:
             config['mol_fm']['total_loss_weights'][feat] = getattr(args, f'{feat}_loss_weight')

@@ -27,7 +27,11 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.conditioning = dataset_config.get('conditioning', {})
         self.conditioning_enabled = self.conditioning.get('enabled', False)
         self.target_property = self.conditioning.get('property', None)
-        self.normalize_property = self.conditioning.get('normalize', True)  
+        self.normalize_property = self.conditioning.get('normalize', True)
+        self.use_hydrogen_counts = bool(dataset_config.get('use_hydrogen_counts', False))
+        self.n_hydrogen_counts = int(dataset_config.get('n_hydrogen_counts', 0))
+        if self.use_hydrogen_counts and self.n_hydrogen_counts <= 0:
+            raise ValueError('n_hydrogen_counts must be positive when use_hydrogen_counts is enabled')
     
         # get the processed data directory
         processed_data_dir: Path = Path(dataset_config['processed_data_dir'])
@@ -70,6 +74,19 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.positions = data_dict['positions']
         self.atom_types = data_dict['atom_types']
         self.atom_charges = data_dict['atom_charges']
+        if self.use_hydrogen_counts:
+            if 'atom_hydrogens' not in data_dict:
+                raise ValueError(
+                    f"Hydrogen-count state requested, but {data_file} has no atom_hydrogens tensor"
+                )
+            self.atom_hydrogens = data_dict['atom_hydrogens'].long()
+            if self.atom_hydrogens.shape[0] != self.atom_types.shape[0]:
+                raise ValueError('atom_hydrogens and atom_types have different lengths')
+            if self.atom_hydrogens.numel() and (
+                self.atom_hydrogens.min() < 0
+                or self.atom_hydrogens.max() >= self.n_hydrogen_counts
+            ):
+                raise ValueError('atom_hydrogens contains a class outside n_hydrogen_counts')
         self.bond_types = data_dict['bond_types']
         self.bond_idxs = data_dict['bond_idxs']
         self.node_idx_array = data_dict['node_idx_array']
@@ -107,6 +124,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
         positions = self.positions[node_start_idx:node_end_idx]
         atom_types = self.atom_types[node_start_idx:node_end_idx].float()
         atom_charges = self.atom_charges[node_start_idx:node_end_idx].long()
+        if self.use_hydrogen_counts:
+            atom_hydrogens = self.atom_hydrogens[node_start_idx:node_end_idx]
 
         # remove COM from positions
         positions = positions - positions.mean(dim=0, keepdim=True)
@@ -151,6 +170,10 @@ class MoleculeDataset(torch.utils.data.Dataset):
         g.ndata['x_1_true'] = positions
         g.ndata['a_1_true'] = atom_types
         g.ndata['c_1_true'] = atom_charges
+        if self.use_hydrogen_counts:
+            g.ndata['h_1_true'] = one_hot(
+                atom_hydrogens, num_classes=self.n_hydrogen_counts
+            ).float()
 
         # Add conditioning property if enabled
         if self.conditioning_enabled and self.target_property:
@@ -176,6 +199,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
             'a': atom_types,
             'c': atom_charges
         }
+        if self.use_hydrogen_counts:
+            dst_dict['h'] = g.ndata['h_1_true']
         prior_node_feats = coupled_node_prior(dst_dict=dst_dict, prior_config=self.prior_config)
         for feat in prior_node_feats:
             g.ndata[f'{feat}_0'] = prior_node_feats[feat]

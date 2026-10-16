@@ -20,6 +20,7 @@ from torch.nn.functional import one_hot
 
 SPLITS = ("train", "val", "test")
 N_BOND_TYPES = 5  # none, single, double, triple, aromatic
+N_HYDROGEN_COUNTS = 4  # attached H count on each heavy atom: 0, 1, 2, 3
 MIN_CHARGE = -2
 MAX_CHARGE = 3
 
@@ -36,7 +37,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("molguidance_hp1kg_baseline/data_s1"),
     )
-    parser.add_argument("--property", choices=("s1", "t1"), default="s1")
+    parser.add_argument("--property", choices=("s1", "t1", "est"), default="s1")
     return parser.parse_args()
 
 
@@ -62,6 +63,7 @@ def convert_records(
     positions: list[torch.Tensor] = []
     atom_types: list[torch.Tensor] = []
     atom_charges: list[torch.Tensor] = []
+    atom_hydrogens: list[torch.Tensor] = []
     bond_types: list[torch.Tensor] = []
     bond_idxs: list[torch.Tensor] = []
     properties: list[float] = []
@@ -78,6 +80,7 @@ def convert_records(
         pos = torch.as_tensor(record["atom_positions"], dtype=torch.float32)
         type_idx = torch.as_tensor(record["atom_types"], dtype=torch.int64)
         charges = torch.as_tensor(record["atom_charges"], dtype=torch.int32)
+        hydrogens = torch.as_tensor(record["atom_hydrogens"], dtype=torch.int64)
         kekule = torch.as_tensor(record["kekule_bonds"], dtype=torch.int64)
         aromatic = torch.as_tensor(record["aromatic_edges"], dtype=torch.bool)
 
@@ -94,6 +97,15 @@ def convert_records(
             raise ValueError(
                 f"record {record_idx}: formal charge outside [{MIN_CHARGE}, {MAX_CHARGE}]"
             )
+        if hydrogens.shape != (n_atoms,):
+            raise ValueError(
+                f"record {record_idx}: invalid atom_hydrogens shape {hydrogens.shape}"
+            )
+        if hydrogens.min() < 0 or hydrogens.max() >= N_HYDROGEN_COUNTS:
+            raise ValueError(
+                f"record {record_idx}: attached hydrogen count outside "
+                f"[0, {N_HYDROGEN_COUNTS - 1}]"
+            )
         if not torch.equal(kekule, kekule.T):
             raise ValueError(f"record {record_idx}: asymmetric Kekule adjacency")
         if not torch.equal(aromatic, aromatic.T):
@@ -109,13 +121,22 @@ def convert_records(
         edge_index = upper.nonzero(as_tuple=False).to(torch.int32)
         edge_type = upper[edge_index[:, 0], edge_index[:, 1]].to(torch.int32)
 
-        prop = float(record[property_name])
+        if property_name == "est":
+            # Match the existing EST export bit-for-bit: cast each state energy
+            # to float32 before subtracting, then store the float32 result.
+            prop = float(
+                torch.tensor(record["s1"], dtype=torch.float32)
+                - torch.tensor(record["t1"], dtype=torch.float32)
+            )
+        else:
+            prop = float(record[property_name])
         if not torch.isfinite(torch.tensor(prop)):
             raise ValueError(f"record {record_idx}: non-finite {property_name}")
 
         positions.append(pos)
         atom_types.append(one_hot(type_idx, num_classes=len(atom_map)).to(torch.bool))
         atom_charges.append(charges)
+        atom_hydrogens.append(hydrogens)
         bond_types.append(edge_type)
         bond_idxs.append(edge_index)
         properties.append(prop)
@@ -124,7 +145,6 @@ def convert_records(
         edge_lengths.append(int(edge_type.numel()))
 
         radicals = torch.as_tensor(record.get("atom_radicals", []), dtype=torch.int64)
-        hydrogens = torch.as_tensor(record.get("atom_hydrogens", []), dtype=torch.int64)
         radical_molecules += int(radicals.numel() > 0 and bool((radicals != 0).any()))
         atoms_with_hydrogen += int((hydrogens > 0).sum())
         total_implicit_hydrogens += int(hydrogens.sum())
@@ -135,6 +155,7 @@ def convert_records(
         "positions": torch.cat(positions, dim=0),
         "atom_types": torch.cat(atom_types, dim=0),
         "atom_charges": torch.cat(atom_charges, dim=0),
+        "atom_hydrogens": torch.cat(atom_hydrogens, dim=0),
         "bond_types": torch.cat(bond_types, dim=0),
         "bond_idxs": torch.cat(bond_idxs, dim=0),
         "node_idx_array": index_ranges(node_lengths),
@@ -154,6 +175,11 @@ def convert_records(
         "radical_molecules_unsupported_by_official_schema": radical_molecules,
         "atoms_with_implicit_hydrogen_not_explicit_nodes": atoms_with_hydrogen,
         "implicit_hydrogens_not_explicit_nodes": total_implicit_hydrogens,
+        "hydrogen_count_classes": list(range(N_HYDROGEN_COUNTS)),
+        "hydrogen_count_histogram": {
+            str(h): int((data["atom_hydrogens"] == h).sum())
+            for h in range(N_HYDROGEN_COUNTS)
+        },
     }
     return data, stats
 
@@ -237,6 +263,7 @@ def main() -> None:
         "source_split_sha256": {},
         "splits": {},
         "edge_classes": ["NO_BOND", "SINGLE", "DOUBLE", "TRIPLE", "AROMATIC"],
+        "hydrogen_count_classes": [0, 1, 2, 3],
         "official_code_changes": 0,
     }
 
@@ -260,8 +287,8 @@ def main() -> None:
 
     report["train_alias_policy"] = "train_a=train_b=train (full existing train split)"
     report["limitations"] = [
-        "The unmodified MolGuidance condition embedder accepts one scalar; this export uses only the selected S1 or T1 property.",
-        "The source tensors contain heavy atoms only; stored hydrogen counts are not node targets in the official schema.",
+        "The MolGuidance condition embedder accepts one scalar; this export uses S1, T1, or EST=S1-T1 as selected.",
+        "Hydrogens remain absent from the coordinate graph; atom_hydrogens is a categorical attached-H target on each heavy atom.",
         "The official schema has no radical-electron target; affected source molecules are counted in this report.",
     ]
     (output / "conversion_report.json").write_text(

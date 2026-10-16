@@ -84,9 +84,11 @@ class CTMCVectorField(EndpointVectorField):
             'c': self.n_charges,
             'e': self.n_bond_types,
         }
+        if self.n_hydrogen_counts > 0:
+            self.mask_idxs['h'] = self.n_hydrogen_counts
 
         # Two separate embeddings for conditional and unconditional cases
-        input_dim_base = self.n_atom_types + self.n_charges + 1 + 2*self.n_mask_feats
+        input_dim_base = self.node_input_dim
         self.scalar_embedding_uncond = nn.Sequential(
             nn.Linear(input_dim_base, self.n_hidden_scalars),
             nn.SiLU(),
@@ -138,7 +140,7 @@ class CTMCVectorField(EndpointVectorField):
         num_nodes = g.num_nodes()
         device = g.device
 
-        # alpha_t has shape (batch_size, 4)
+        # alpha_t has shape (batch_size, number of active modalities)
 
         # sample positions at time t
         x_idx = self.canonical_feat_order.index('x')
@@ -147,8 +149,11 @@ class CTMCVectorField(EndpointVectorField):
         g.ndata['x_t'] = src_weight*g.ndata['x_0'] + dst_weight*g.ndata['x_1_true']
 
         # sample categorical node features
-        t_node = t[node_batch_idx]
-        for feat, feat_idx in zip(['a', 'c'], [1,2]):
+        categorical_node_feats = [
+            feat for feat in self.canonical_feat_order if feat not in ('x', 'e')
+        ]
+        for feat in categorical_node_feats:
+            feat_idx = self.canonical_feat_order.index(feat)
 
             # all ground-truth categorical variables are set to one-hot representations without mask token by dataloader class
             # so here we convert to token indicies by argmaxing, and then one-hot encode again but with mask token
@@ -164,7 +169,8 @@ class CTMCVectorField(EndpointVectorField):
         # sample categorical edge features
         num_edges = g.num_edges() / 2
         num_edges = int(num_edges)
-        alpha_t_e = alpha_t[:, 3][edge_batch_idx][upper_edge_mask]
+        e_idx = self.canonical_feat_order.index('e')
+        alpha_t_e = alpha_t[:, e_idx][edge_batch_idx][upper_edge_mask]
         et_upper = g.edata['e_1_true'][upper_edge_mask].argmax(-1)
         et_upper[ torch.rand(num_edges, device=device) < 1 - alpha_t_e ] = self.mask_idxs['e']
         
@@ -588,6 +594,8 @@ class CTMCVectorField(EndpointVectorField):
             ]
             if not self.exclude_charges:
                 base_features.append(g.ndata['c_t'])
+            if self.n_hydrogen_counts > 0:
+                base_features.append(g.ndata['h_t'])
             base_features = torch.cat(base_features, dim=-1)
             node_scalar_features = self.scalar_embedding_uncond(base_features)
 
@@ -710,8 +718,16 @@ class CTMCVectorField(EndpointVectorField):
             # predict final charges and atom type logits
             node_scalar_features = self.node_output_head(node_scalar_features)
             atom_type_logits = node_scalar_features[:, :self.n_atom_types]
+            output_offset = self.n_atom_types
             if not self.exclude_charges:
-                atom_charge_logits = node_scalar_features[:, self.n_atom_types:]
+                atom_charge_logits = node_scalar_features[
+                    :, output_offset:output_offset + self.n_charges
+                ]
+                output_offset += self.n_charges
+            if self.n_hydrogen_counts > 0:
+                atom_hydrogen_logits = node_scalar_features[
+                    :, output_offset:output_offset + self.n_hydrogen_counts
+                ]
 
             # predict the final edge logits
             ue_feats = edge_features[upper_edge_mask]
@@ -732,13 +748,15 @@ class CTMCVectorField(EndpointVectorField):
         }
         if not self.exclude_charges:
             dst_dict['c'] = atom_charge_logits
+        if self.n_hydrogen_counts > 0:
+            dst_dict['h'] = atom_hydrogen_logits
 
         # apply softmax to categorical features, if requested
         # at training time, we don't want to apply softmax because we use cross-entropy loss which includes softmax
         # at inference time, we want to apply softmax to get a vector which lies on the simplex
         if apply_softmax:
             for feat in dst_dict.keys():
-                if feat in ['a', 'c', 'e']: # if this is a categorical feature
+                if feat in self.n_cat_feats: # if this is a categorical feature
                     dst_dict[feat] = torch.softmax(dst_dict[feat], dim=-1) # apply softmax to this feature
 
         return dst_dict

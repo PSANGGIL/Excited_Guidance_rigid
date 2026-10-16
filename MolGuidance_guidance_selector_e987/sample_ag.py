@@ -293,7 +293,7 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
             if feat == 'x':
                 continue
             
-            guide_weight = guide_w[feat]  # Here 'feat' will be 'a', 'c', or 'e'
+            guide_weight = guide_w.get(feat, guide_w.get('a', 1.0))
             
             if feat == 'e':
                 data_src = g.edata

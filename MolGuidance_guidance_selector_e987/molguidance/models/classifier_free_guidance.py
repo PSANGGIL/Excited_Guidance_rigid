@@ -11,6 +11,99 @@ from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.models.ctmc_vector_field import CTMCVectorField
 from molguidance.models.loss_utils import reduce_time_scaled_loss_equivalent
 
+
+CATEGORICAL_PROBABILITY_MODES = ("corrected", "legacy")
+
+
+def _project_to_probability_simplex(values: torch.Tensor) -> torch.Tensor:
+    """Project vectors onto the probability simplex along the last axis.
+
+    Linear CFG with a scale larger than one is an extrapolation and can produce
+    negative entries. The Euclidean simplex projection is deterministic and is
+    the closest valid probability vector to that extrapolation.
+    """
+    sorted_values, _ = torch.sort(values, dim=-1, descending=True)
+    cssv = sorted_values.cumsum(dim=-1) - 1.0
+    ranks = torch.arange(
+        1, values.shape[-1] + 1, device=values.device, dtype=values.dtype
+    )
+    support = sorted_values - cssv / ranks > 0
+    rho = support.sum(dim=-1, keepdim=True).clamp_min(1) - 1
+    theta = cssv.gather(-1, rho) / (rho.to(values.dtype) + 1.0)
+    projected = (values - theta).clamp_min(0.0)
+    return projected / projected.sum(dim=-1, keepdim=True).clamp_min(
+        torch.finfo(values.dtype).tiny
+    )
+
+
+def combine_guided_endpoint_probabilities(
+    p_unconditional: torch.Tensor,
+    p_conditional: torch.Tensor,
+    guide_weight: float,
+    temperature: float | torch.Tensor = 1.0,
+    guidance_format: str = "log",
+    probability_mode: str = "corrected",
+    eps: float = 1e-9,
+) -> torch.Tensor:
+    """Combine endpoint distributions and apply temperature exactly once.
+
+    The corrected log-CFG expression is
+
+        softmax(((1-w) log p_u + w log p_c) / T).
+
+    The released rate-matrix probability branch instead evaluated
+    softmax(p_guided / T). That behavior remains available only through the
+    explicit legacy mode so old sampling results can be reproduced.
+    """
+    if probability_mode not in CATEGORICAL_PROBABILITY_MODES:
+        raise ValueError(
+            f"Unknown categorical probability mode {probability_mode!r}; "
+            f"choose one of {CATEGORICAL_PROBABILITY_MODES}."
+        )
+    if guidance_format not in {"linear", "log"}:
+        raise ValueError(
+            f"Invalid guidance_format {guidance_format!r}; choose 'linear' or 'log'."
+        )
+    if p_unconditional.shape != p_conditional.shape:
+        raise ValueError(
+            "Conditional and unconditional probability tensors must have the same shape."
+        )
+    if not torch.isfinite(p_unconditional).all() or not torch.isfinite(p_conditional).all():
+        raise ValueError("Categorical endpoint probabilities contain NaN or infinity.")
+
+    temperature_tensor = torch.as_tensor(
+        temperature, device=p_unconditional.device, dtype=p_unconditional.dtype
+    )
+    if temperature_tensor.numel() != 1 or not torch.isfinite(temperature_tensor):
+        raise ValueError("Categorical temperature must be one finite scalar.")
+    if float(temperature_tensor) <= 0.0:
+        raise ValueError("Categorical temperature must be greater than zero.")
+
+    p_u = p_unconditional.clamp_min(0.0)
+    p_c = p_conditional.clamp_min(0.0)
+    p_u = p_u / p_u.sum(dim=-1, keepdim=True).clamp_min(eps)
+    p_c = p_c / p_c.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+    if guidance_format == "log":
+        guided_log_probability = (
+            (1.0 - guide_weight) * torch.log(p_u.clamp_min(eps))
+            + guide_weight * torch.log(p_c.clamp_min(eps))
+        )
+        if probability_mode == "legacy":
+            guided_probability = torch.exp(guided_log_probability)
+            return F.softmax(guided_probability / temperature_tensor, dim=-1)
+        return F.softmax(guided_log_probability / temperature_tensor, dim=-1)
+
+    guided_probability = (1.0 - guide_weight) * p_u + guide_weight * p_c
+    if probability_mode == "legacy":
+        return F.softmax(guided_probability / temperature_tensor, dim=-1)
+
+    guided_probability = _project_to_probability_simplex(guided_probability)
+    return F.softmax(
+        torch.log(guided_probability.clamp_min(eps)) / temperature_tensor,
+        dim=-1,
+    )
+
 class ZerosEmbedding(nn.Module):
     """
     Module that returns a tensor of zeros with the specified hidden dimension.
@@ -95,6 +188,7 @@ class ClassifierFreeGuidance(FlowMol):
                                             interpolant_scheduler=self.interpolant_scheduler, 
                                             n_charges=self.n_atom_charges, 
                                             n_bond_types=self.n_bond_types,
+                                            n_hydrogen_counts=self.n_hydrogen_counts,
                                             exclude_charges=self.exclude_charges,
                                             property_embedding_dim=self.property_embedding_dim,
                                             property_embedder=self.property_embedder,
@@ -172,7 +266,7 @@ class ClassifierFreeGuidance(FlowMol):
             target = data_src[f'{feat}_1_true']
             if feat == "e":
                 target = target[upper_edge_mask]
-            if feat in ['a', 'c', 'e']:
+            if feat in self.n_cat_dict:
                 if self.target_blur == 0.0:
                     target = target.argmax(dim=-1)
                 else:
@@ -180,7 +274,7 @@ class ClassifierFreeGuidance(FlowMol):
                     target = F.softmax(target, dim=-1)
 
             # for CTMC parameterization, we do not apply loss on already unmasked features
-            if feat in ['a', 'c', 'e']:
+            if feat in self.n_cat_dict:
                 if feat == 'e':
                     xt_idxs = data_src[f'{feat}_t'][upper_edge_mask].argmax(-1)
                 else:
@@ -233,6 +327,10 @@ class ClassifierFreeGuidance(FlowMol):
         dfm_type='campbell',
         guidance_format: str = "log",  # 'linear' or 'log'
         where_to_apply_guide: str = "probabilities",  # 'probabilities' or 'rate_matrix',
+        categorical_temperature: float | None = None,
+        categorical_probability_mode: str = "corrected",
+        collect_categorical_trace: bool = False,
+        residual_mask_policy: str = "reject",
         dataset_name: str = "qm9",
          **kwargs):   
         """
@@ -286,6 +384,9 @@ class ClassifierFreeGuidance(FlowMol):
             integrate_kwargs['dfm_type'] = dfm_type
             integrate_kwargs['guidance_format'] = guidance_format
             integrate_kwargs['where_to_apply_guide'] = where_to_apply_guide
+            integrate_kwargs['categorical_temperature'] = categorical_temperature
+            integrate_kwargs['categorical_probability_mode'] = categorical_probability_mode
+            integrate_kwargs['collect_categorical_trace'] = collect_categorical_trace
 
         # Integrate with guidance
         itg_result = self.vector_field.integrate_with_CFG_guidance(g, node_batch_idx, **integrate_kwargs, **kwargs)
@@ -314,6 +415,7 @@ class ClassifierFreeGuidance(FlowMol):
                 ctmc_mol=ctmc_mol,
                 build_xt_traj=xt_traj,
                 build_ep_traj=ep_traj,
+                residual_mask_policy=residual_mask_policy,
                 exclude_charges=self.exclude_charges))
 
         return molecules    
@@ -331,6 +433,10 @@ class ClassifierFreeGuidance(FlowMol):
         dfm_type='campbell_rate_matrix',  
         guidance_format: str = "log", 
         where_to_apply_guide: str = "probabilities",
+        categorical_temperature: float | None = None,
+        categorical_probability_mode: str = "corrected",
+        collect_categorical_trace: bool = False,
+        residual_mask_policy: str = "reject",
         dataset_name: str = "qm9",
         **kwargs):
         """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
@@ -365,6 +471,10 @@ class ClassifierFreeGuidance(FlowMol):
             dfm_type=dfm_type,
             guidance_format=guidance_format,
             where_to_apply_guide=where_to_apply_guide,
+            categorical_temperature=categorical_temperature,
+            categorical_probability_mode=categorical_probability_mode,
+            collect_categorical_trace=collect_categorical_trace,
+            residual_mask_policy=residual_mask_policy,
             dataset_name=dataset_name,
             **kwargs)
 
@@ -393,6 +503,9 @@ class CFGVectorField(CTMCVectorField):
             multilple_values_to_one_property: List[float|int] | None = None,
             guidance_format: str = "linear",
             where_to_apply_guide: str = "probabilities",
+            categorical_temperature: float | None = None,
+            categorical_probability_mode: str = "corrected",
+            collect_categorical_trace: bool = False,
             dataset_name: str = "qm9",
             **kwargs):
 
@@ -484,6 +597,8 @@ class CFGVectorField(CTMCVectorField):
                                         multilple_values_to_one_property=multilple_values_to_one_property,
                                         guidance_format=guidance_format,
                                         where_to_apply_guide=where_to_apply_guide,
+                                        categorical_temperature=categorical_temperature,
+                                        categorical_probability_mode=categorical_probability_mode,
                                         **kwargs)            
 
             if visualize:
@@ -547,6 +662,8 @@ class CFGVectorField(CTMCVectorField):
                         multilple_values_to_one_property: List[float|int] | None = None,
                         guidance_format: str = "linear",  # 'linear' or 'log'
                         where_to_apply_guide: str = "probabilities",  # 'probabilities' or 'rate_matrix'
+                        categorical_temperature: float | None = None,
+                        categorical_probability_mode: str = "corrected",
                         **kwargs):
 
         # Get predictions from unconditional and conditional models
@@ -589,7 +706,8 @@ class CFGVectorField(CTMCVectorField):
             if feat == 'x':
                 continue
             
-            guide_weight = guide_w[feat] # Here 'feat' will be 'a', 'c', or 'e'
+            # Use the atom guidance scale for H-count unless an explicit h scale is supplied.
+            guide_weight = guide_w.get(feat, guide_w.get('a', 1.0))
 
             if feat == 'e':
                 data_src = g.edata
@@ -602,7 +720,13 @@ class CFGVectorField(CTMCVectorField):
                 xt = xt[upper_edge_mask]
 
             # Apply temperature
-            temperature = cat_temp_func(t_i)
+            temperature = (
+                float(categorical_temperature)
+                if categorical_temperature is not None
+                else float(cat_temp_func(t_i))
+            )
+            if temperature <= 0.0:
+                raise ValueError("categorical temperature must be > 0")
 
             if dfm_type == 'campbell':
                 # Get log probabilities
@@ -638,7 +762,6 @@ class CFGVectorField(CTMCVectorField):
                 cond_val = cond_pred[feat]
 
                 if where_to_apply_guide == "probabilities":
-                    # not sure should we add temperature here or later yet
                     p_1_given_t_uncond = F.softmax(uncond_val, dim=-1)
                     p_1_given_t_cond = F.softmax(cond_val, dim=-1)
                 elif where_to_apply_guide == "rate_matrix":
@@ -740,12 +863,16 @@ class CFGVectorField(CTMCVectorField):
             if guidance_format == "log":
                 log_p_uncond = torch.log(p_1_given_t_uncond + eps)
                 log_p_cond = torch.log(p_1_given_t_cond + eps)
-                p_s_1 = torch.exp((1 - guide_weight) * log_p_uncond + guide_weight * log_p_cond)
+                log_p_guided = (1 - guide_weight) * log_p_uncond + guide_weight * log_p_cond
+                log_p_guided = log_p_guided - torch.logsumexp(log_p_guided, dim=-1, keepdim=True)
+                p_s_1 = torch.softmax(log_p_guided / max(float(temperature), eps), dim=-1)
             elif guidance_format == "linear":
-                p_s_1 = (1 - guide_weight) * p_1_given_t_uncond + guide_weight * p_1_given_t_cond 
+                p_s_1 = (1 - guide_weight) * p_1_given_t_uncond + guide_weight * p_1_given_t_cond
+                p_s_1 = p_s_1.clamp_min(eps)
+                p_s_1 = p_s_1 / p_s_1.sum(dim=-1, keepdim=True).clamp_min(eps)
+                p_s_1 = torch.softmax(torch.log(p_s_1) / max(float(temperature), eps), dim=-1)
             else:
                 raise ValueError(f"Invalid guidance_format: {guidance_format}. Choose 'linear' or 'log'.")
-            p_s_1 = F.softmax(p_s_1 / temperature, dim=-1) # softmax can do normalization
             R_t_guided = CFGVectorField._compute_rate_matrix(p_s_1, xt, alpha_t, alpha_t_prime,
                                                 stochasticity, mask_index, n_classes)
 

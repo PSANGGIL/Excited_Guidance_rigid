@@ -19,7 +19,8 @@ class SampledMolecule:
     def __init__(self, g: dgl.DGLGraph, 
         atom_type_map: List[str], 
         traj_frames: Dict[str, torch.Tensor] = None,
-        ctmc_mol: bool = False, # whether the molecule was sampled from a CTMC model. Important because one-hot encodings will contain a mask token. 
+        ctmc_mol: bool = False, # whether the molecule was sampled from a CTMC model. Important because one-hot encodings will contain a mask token.
+        residual_mask_policy: str = "reject",
         exclude_charges: bool = False, 
         align_traj: bool = True,
         build_xt_traj=True,
@@ -31,18 +32,24 @@ class SampledMolecule:
         self.exclude_charges = exclude_charges
         self.align_traj = align_traj
         self.ctmc_mol = ctmc_mol
+        if residual_mask_policy not in {"reject", "allow"}:
+            raise ValueError("residual_mask_policy must be 'reject' or 'allow'")
+        self.residual_mask_policy = residual_mask_policy
 
-        if ctmc_mol:
-            atom_type_map.append('Se') # masked molecules will show up as selenium
+        if ctmc_mol and residual_mask_policy == "reject":
+            atom_type_map.append('__MASK_ATOM__')
         
         # save the graph
         self.g = g
 
         self.positions, self.atom_types, self.atom_charges, self.bond_types, self.bond_src_idxs, self.bond_dst_idxs = extract_moldata_from_graph(
-            g, 
-            atom_type_map, 
+            g,
+            atom_type_map,
             exclude_charges=exclude_charges,
             ctmc_mol=self.ctmc_mol)
+        self.atom_hydrogens = extract_hydrogen_counts_from_graph(
+            g, ctmc_mol=self.ctmc_mol
+        )
 
         self.atom_type_map = atom_type_map
         self.num_atoms = g.num_nodes()
@@ -83,9 +90,11 @@ class SampledMolecule:
         # atom_types_str = [atom.GetSymbol() for atom in molecule.GetAtoms()]
         atom_types_idx = torch.zeros(mol.GetNumAtoms()).long()
         atom_charges = torch.zeros_like(atom_types_idx)
+        atom_hydrogens = torch.zeros_like(atom_types_idx)
         for i, atom in enumerate(mol.GetAtoms()):
             atom_types_idx[i] = atom_type_to_idx[atom.GetSymbol()]
             atom_charges[i] = atom.GetFormalCharge()
+            atom_hydrogens[i] = atom.GetTotalNumHs(includeNeighbors=True)
 
         # get one-hot encoded of existing bonds only (no non-existing bonds)
         adj = torch.from_numpy(Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=True))
@@ -104,6 +113,10 @@ class SampledMolecule:
         g.ndata['x_1'] = positions
         g.ndata['a_1'] = one_hot(atom_types_idx.long(), num_classes=len(atom_type_map)).float()
         g.ndata['c_1'] = one_hot(atom_charges.long() + 2, num_classes=6).float()
+        n_hydrogen_classes = max(4, int(atom_hydrogens.max()) + 1)
+        g.ndata['h_1'] = one_hot(
+            atom_hydrogens.long(), num_classes=n_hydrogen_classes
+        ).float()
         g.edata['e_1'] = one_hot(edge_attr.long(), num_classes=5).float()
         g.edata['ue_mask'] = torch.ones(g.num_edges()).bool()
 
@@ -111,7 +124,15 @@ class SampledMolecule:
     
     # this code is adapted from MiDi: https://github.com/cvignac/MiDi/blob/ba07fc5b1313855c047ba0b90e7aceae47e34e38/midi/analysis/rdkit_functions.py
     def build_molecule(self):
-        mol = build_molecule(self.positions, self.atom_types, self.atom_charges, self.bond_src_idxs, self.bond_dst_idxs, self.bond_types)
+        mol = build_molecule(
+            self.positions,
+            self.atom_types,
+            self.atom_charges,
+            self.bond_src_idxs,
+            self.bond_dst_idxs,
+            self.bond_types,
+            atom_hydrogens=self.atom_hydrogens,
+        )
         return mol
     
     def compute_valencies(self):
@@ -164,12 +185,24 @@ class SampledMolecule:
                 self.atom_type_map,
                 ctmc_mol=self.ctmc_mol)
 
+            atom_hydrogens = extract_hydrogen_counts_from_graph(
+                g_dummy, ctmc_mol=self.ctmc_mol
+            )
+
             # align positions to final frame
             if self.align_traj:
                 positions = rigid_alignment(positions, x_final)
 
             # build rdkit molecule
-            mol = build_molecule(positions, atom_types, atom_charges, bond_src_idxs, bond_dst_idxs, bond_types)
+            mol = build_molecule(
+                positions,
+                atom_types,
+                atom_charges,
+                bond_src_idxs,
+                bond_dst_idxs,
+                bond_types,
+                atom_hydrogens=atom_hydrogens,
+            )
 
             # add mol to list
             traj_mols.append(mol)
@@ -219,14 +252,45 @@ def extract_moldata_from_graph(g: dgl.DGLGraph, atom_type_map: List[str], exclud
     return positions, atom_types, atom_charges, bond_types, bond_src_idxs, bond_dst_idxs
 
 
-def build_molecule(positions, atom_types, atom_charges, bond_src_idxs, bond_dst_idxs, bond_types):
+
+def extract_hydrogen_counts_from_graph(g: dgl.DGLGraph, ctmc_mol: bool = False):
+    # A residual CTMC mask is represented as -1 and rejected by build_molecule.
+    if 'h_1' not in g.ndata:
+        return None
+    hydrogen_state = g.ndata['h_1']
+    hydrogen_counts = hydrogen_state.argmax(dim=1).long()
+    if ctmc_mol:
+        mask_index = hydrogen_state.shape[-1] - 1
+        hydrogen_counts[hydrogen_counts == mask_index] = -1
+    return hydrogen_counts
+
+
+def build_molecule(positions, atom_types, atom_charges, bond_src_idxs, bond_dst_idxs, bond_types, atom_hydrogens=None):
     """Builds a rdkit molecule from the given atom and bond information."""
+    # Residual CTMC masks are invalid states, not selenium or a charge class.
+    if any(atom_type == '__MASK_ATOM__' for atom_type in atom_types):
+        return None
+    if atom_charges is None:
+        atom_charges = [0] * len(atom_types)
+    if atom_hydrogens is not None:
+        if len(atom_hydrogens) != len(atom_types):
+            raise ValueError('atom_hydrogens and atom_types have different lengths')
+        if any(int(h) < 0 for h in atom_hydrogens):
+            return None
+    else:
+        atom_hydrogens = [None] * len(atom_types)
+
     # create a rdkit molecule and add atoms to it
     mol = Chem.RWMol()
-    for atom_type, charge in zip(atom_types, atom_charges):
+    for atom_type, charge, hydrogen_count in zip(
+        atom_types, atom_charges, atom_hydrogens
+    ):
         a = Chem.Atom(atom_type)
         if charge != 0:
             a.SetFormalCharge(int(charge))
+        if hydrogen_count is not None:
+            a.SetNumExplicitHs(int(hydrogen_count))
+            a.SetNoImplicit(True)
         mol.AddAtom(a)
 
     # add bonds to rdkit molecule
@@ -273,7 +337,10 @@ def copy_graph(g: dgl.DGLGraph) -> dgl.DGLGraph:
     return g_copy
 
 def dataset_mol_to_sampled_mol(g, atom_type_map) -> SampledMolecule:
-    for feat in 'xace':
+    features = ['x', 'a', 'c', 'e']
+    if 'h_1_true' in g.ndata:
+        features.insert(-1, 'h')
+    for feat in features:
         if feat == 'e':
             data_src = g.edata
         else:

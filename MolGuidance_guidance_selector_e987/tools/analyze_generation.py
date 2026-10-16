@@ -217,17 +217,31 @@ def main() -> None:
     writer.close()
 
     png_paths: list[str] = []
+    depiction_failures: list[dict[str, object]] = []
     for page_index, start in enumerate(range(0, len(novel_molecules), args.page_size)):
         page = novel_molecules[start : start + args.page_size]
         page_mols: list[Chem.Mol] = []
         legends: list[str] = []
         for source_sdf_index, generation_index, smiles, mol in page:
             draw_mol = Chem.Mol(mol)
-            rdDepictor.Compute2DCoords(draw_mol)
+            try:
+                rdDepictor.Compute2DCoords(draw_mol)
+            except Exception as exc:
+                depiction_failures.append(
+                    {
+                        "source_sdf_index": source_sdf_index,
+                        "generation_index": generation_index,
+                        "smiles": smiles,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
             page_mols.append(draw_mol)
             legends.append(
                 f"#{generation_index} (sdf {source_sdf_index}) {smiles[:42]}"
             )
+        if not page_mols:
+            continue
         image = Draw.MolsToGridImage(
             page_mols,
             molsPerRow=5,
@@ -264,6 +278,8 @@ def main() -> None:
         "csv": str(csv_path.resolve()),
         "novel_sdf": str(novel_sdf.resolve()),
         "pngs": png_paths,
+        "depiction_failures": len(depiction_failures),
+        "depiction_failure_records": depiction_failures,
     }
     summary_path = args.out_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

@@ -35,6 +35,7 @@ class FlowMol(pl.LightningModule):
                  marginal_dists_file: str,                 
                  n_atom_charges: int = 6,
                  n_bond_types: int = 5,
+                 n_hydrogen_counts: int = 0,
                  sample_interval: float = 1.0, # how often to sample molecules from the model, measured in epochs
                  n_mols_to_sample: int = 64, # how many molecules to sample from the model during each sample/eval step during training
                  time_scaled_loss: bool = True,
@@ -59,12 +60,22 @@ class FlowMol(pl.LightningModule):
                  ):
         super().__init__()
 
+        # Keep optional feature sets local to each model instance. Mutating the
+        # class lists leaks modalities into subsequently constructed models.
+        self.canonical_feat_order = list(type(self).canonical_feat_order)
+        self.node_feats = list(type(self).node_feats)
+        self.edge_feats = list(type(self).edge_feats)
+
         self.lr_scheduler_config = lr_scheduler_config
         self.atom_type_map = atom_type_map
         self.n_atom_types = len(atom_type_map)
         self.n_atom_charges = n_atom_charges
         self.n_bond_types = n_bond_types
-        self.total_loss_weights = total_loss_weights
+        self.n_hydrogen_counts = int(n_hydrogen_counts)
+        if self.n_hydrogen_counts < 0:
+            raise ValueError('n_hydrogen_counts must be non-negative')
+        self.use_hydrogen_counts = self.n_hydrogen_counts > 0
+        self.total_loss_weights = dict(total_loss_weights)
         self.time_scaled_loss = time_scaled_loss
         self.prior_config = prior_config
         self.exclude_charges = exclude_charges
@@ -78,6 +89,17 @@ class FlowMol(pl.LightningModule):
         self.properties_handle_method = properties_handle_method
         self.property_embedding_dim = property_embedding_dim
         self.dataset_name = dataset_name
+
+        if self.use_hydrogen_counts:
+            if parameterization != 'ctmc':
+                raise NotImplementedError(
+                    'hydrogen-count state is currently supported only by the CTMC parameterization'
+                )
+            self.canonical_feat_order.insert(-1, 'h')
+            self.node_feats.append('h')
+        self.categorical_feats = [
+            feat for feat in self.canonical_feat_order if feat != 'x'
+        ]
 
         # for conditional generation of molecules with a property
         self.property_embedder = nn.Sequential(
@@ -115,7 +137,8 @@ class FlowMol(pl.LightningModule):
         if self.exclude_charges:
             self.node_feats.remove('c')
             self.canonical_feat_order.remove('c')
-            self.total_loss_weights.pop('c')
+            self.total_loss_weights.pop('c', None)
+            self.categorical_feats.remove('c')
 
         # create a dictionary mapping feature -> number of categories
         self.n_cat_dict = {
@@ -123,6 +146,8 @@ class FlowMol(pl.LightningModule):
             'c': n_atom_charges,
             'e': n_bond_types,
         }
+        if self.use_hydrogen_counts:
+            self.n_cat_dict['h'] = self.n_hydrogen_counts
 
         for feat in self.canonical_feat_order:
             if feat not in total_loss_weights:
@@ -159,6 +184,7 @@ class FlowMol(pl.LightningModule):
                                             interpolant_scheduler=self.interpolant_scheduler, 
                                             n_charges=n_atom_charges, 
                                             n_bond_types=n_bond_types,
+                                            n_hydrogen_counts=self.n_hydrogen_counts,
                                             exclude_charges=self.exclude_charges,
                                             property_embedding_dim=property_embedding_dim,
                                             property_embedder=self.property_embedder,
@@ -172,6 +198,7 @@ class FlowMol(pl.LightningModule):
                                             interpolant_scheduler=self.interpolant_scheduler, 
                                             n_charges=n_atom_charges, 
                                             n_bond_types=n_bond_types,
+                                            n_hydrogen_counts=self.n_hydrogen_counts,
                                             exclude_charges=self.exclude_charges,
                                             **vector_field_config)
 
@@ -211,12 +238,12 @@ class FlowMol(pl.LightningModule):
             self.prior_config['c']['kwargs']['p_c_given_a'] = p_c_given_a
 
         if self.parameterization == 'dirichlet':
-            for feat in ['a', 'c', 'e']:
+            for feat in self.categorical_feats:
                 if self.prior_config[feat]['type'] != 'uniform-simplex':
                     raise ValueError('dirichlet parameterization requires that all categorical priors be uniform-simplex')
 
         if self.parameterization == 'ctmc':
-            for feat in ['a', 'c', 'e']:
+            for feat in self.categorical_feats:
                 if self.prior_config[feat]['type'] != 'ctmc':
                     raise ValueError('ctmc parameterization requires that all categorical priors be ctmc')
                 
@@ -251,6 +278,10 @@ class FlowMol(pl.LightningModule):
             'c': categorical_loss_fn(reduction=reduction, **cat_kwargs),
             'e': categorical_loss_fn(reduction=reduction, **e_kwargs, **cat_kwargs),
         }
+        if self.use_hydrogen_counts:
+            self.loss_fn_dict['h'] = categorical_loss_fn(
+                reduction=reduction, **cat_kwargs
+            )
 
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
 
@@ -386,7 +417,7 @@ class FlowMol(pl.LightningModule):
                 target = data_src[f'{feat}_1_true']
                 if feat == "e":
                     target = target[upper_edge_mask]
-                if feat in ['a', 'c', 'e']:
+                if feat in self.n_cat_dict:
                     if self.target_blur == 0.0:
                         target = target.argmax(dim=-1)
                     else:
@@ -408,7 +439,7 @@ class FlowMol(pl.LightningModule):
                 target = alpha_t_prime_i*(x_1 - x_0)
 
             # for CTMC parameterization, we do not apply loss on already unmasked features
-            if self.parameterization == 'ctmc' and feat in ['a', 'c', 'e']:
+            if self.parameterization == 'ctmc' and feat in self.n_cat_dict:
                 if feat == 'e':
                     xt_idxs = data_src[f'{feat}_t'][upper_edge_mask].argmax(-1)
                 else:

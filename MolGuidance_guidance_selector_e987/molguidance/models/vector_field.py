@@ -15,7 +15,8 @@ class EndpointVectorField(nn.Module):
                     canonical_feat_order: list,
                     interpolant_scheduler: InterpolantScheduler,
                     n_charges: int = 6,
-                    n_bond_types: int = 5, 
+                    n_bond_types: int = 5,
+                    n_hydrogen_counts: int = 0,
                     n_vec_channels: int = 16,
                     n_cp_feats: int = 0, 
                     n_hidden_scalars: int = 64,
@@ -44,6 +45,7 @@ class EndpointVectorField(nn.Module):
         self.n_atom_types = n_atom_types
         self.n_charges = n_charges
         self.n_bond_types = n_bond_types
+        self.n_hydrogen_counts = int(n_hydrogen_counts)
         self.n_hidden_scalars = n_hidden_scalars
         self.n_hidden_edge_feats = n_hidden_edge_feats
         self.n_vec_channels = n_vec_channels
@@ -70,16 +72,29 @@ class EndpointVectorField(nn.Module):
         self.continuous_inv_temp_func = self.build_continuous_inv_temp_func(self.continuous_inv_temp_schedule, self.continouts_inv_temp_max) 
 
         self.n_cat_feats = { # number of possible values for each categorical variable (not including mask tokens in the case of CTMC)
-            'a': n_atom_types,
-            'c': n_charges,
-            'e': n_bond_types
+            'a': self.n_atom_types,
+            'c': self.n_charges,
+            'e': self.n_bond_types,
         }
+        if self.n_hydrogen_counts > 0:
+            self.n_cat_feats['h'] = self.n_hydrogen_counts
 
         n_mask_feats = int(has_mask)
         self.n_mask_feats = n_mask_feats
 
+        n_node_categorical_features = 1 + int(not self.exclude_charges)
+        if self.n_hydrogen_counts > 0:
+            n_node_categorical_features += 1
+        node_input_dim = (
+            self.n_atom_types
+            + self.n_charges
+            + self.n_hydrogen_counts
+            + 1
+            + n_node_categorical_features * n_mask_feats
+        )
+        self.node_input_dim = node_input_dim
         self.scalar_embedding = nn.Sequential(
-            nn.Linear(n_atom_types + n_charges + 1 + 2*n_mask_feats, n_hidden_scalars),
+            nn.Linear(node_input_dim, n_hidden_scalars),
             nn.SiLU(),
             nn.Linear(n_hidden_scalars, n_hidden_scalars),
             nn.SiLU(),
@@ -125,7 +140,10 @@ class EndpointVectorField(nn.Module):
         self.node_output_head = nn.Sequential(
             nn.Linear(n_hidden_scalars, n_hidden_scalars),
             nn.SiLU(),
-            nn.Linear(n_hidden_scalars, n_atom_types + n_charges)
+            nn.Linear(
+                n_hidden_scalars,
+                self.n_atom_types + self.n_charges + self.n_hydrogen_counts,
+            )
         )
 
         self.to_edge_logits = nn.Sequential(
@@ -162,6 +180,8 @@ class EndpointVectorField(nn.Module):
             # if we are not excluding charges, include them in the node scalar features
             if not self.exclude_charges:
                 node_scalar_features.append(g.ndata['c_t'])
+            if self.n_hydrogen_counts > 0:
+                node_scalar_features.append(g.ndata['h_t'])
 
             node_scalar_features = torch.cat(node_scalar_features, dim=-1)
             node_scalar_features = self.scalar_embedding(node_scalar_features)
@@ -211,8 +231,16 @@ class EndpointVectorField(nn.Module):
             # predict final charges and atom type logits
             node_scalar_features = self.node_output_head(node_scalar_features)
             atom_type_logits = node_scalar_features[:, :self.n_atom_types]
+            output_offset = self.n_atom_types
             if not self.exclude_charges:
-                atom_charge_logits = node_scalar_features[:, self.n_atom_types:]
+                atom_charge_logits = node_scalar_features[
+                    :, output_offset:output_offset + self.n_charges
+                ]
+                output_offset += self.n_charges
+            if self.n_hydrogen_counts > 0:
+                atom_hydrogen_logits = node_scalar_features[
+                    :, output_offset:output_offset + self.n_hydrogen_counts
+                ]
 
             # predict the final edge logits
             ue_feats = edge_features[upper_edge_mask]
@@ -233,13 +261,15 @@ class EndpointVectorField(nn.Module):
         }
         if not self.exclude_charges:
             dst_dict['c'] = atom_charge_logits
+        if self.n_hydrogen_counts > 0:
+            dst_dict['h'] = atom_hydrogen_logits
 
         # apply softmax to categorical features, if requested
         # at training time, we don't want to apply softmax because we use cross-entropy loss which includes softmax
         # at inference time, we want to apply softmax to get a vector which lies on the simplex
         if apply_softmax:
             for feat in dst_dict.keys():
-                if feat in ['a', 'c', 'e']: # if this is a categorical feature
+                if feat in self.n_cat_feats: # if this is a categorical feature
                     dst_dict[feat] = torch.softmax(dst_dict[feat], dim=-1) # apply softmax to this feature
 
         return dst_dict
