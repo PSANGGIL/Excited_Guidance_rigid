@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Sequence
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -18,6 +18,7 @@ from molguidance.data_processing.priors import uniform_simplex_prior, biased_sim
 from molguidance.data_processing.priors import inference_prior_register, edge_prior
 from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.analysis.metrics import SampleAnalyzer
+from molguidance.data_processing.conditional_count import ConditionalAtomCountSampler
 from einops import rearrange
 from .property_embeddings import PropertyEmbedder
 from .loss_utils import reduce_time_scaled_loss_equivalent
@@ -57,6 +58,8 @@ class FlowMol(pl.LightningModule):
                  gaussian_stop: float|None = None,
                  n_gaussians: int = 5,
                  properties_handle_method: str = 'concatenate_sum', # choices ['concatenate', 'sum', 'multiply', 'concatenate_sum', 'concatenate_multiply']
+                 validation_config: dict | None = None,
+                 atom_count_conditioning: dict | None = None,
                  ):
         super().__init__()
 
@@ -89,6 +92,37 @@ class FlowMol(pl.LightningModule):
         self.properties_handle_method = properties_handle_method
         self.property_embedding_dim = property_embedding_dim
         self.dataset_name = dataset_name
+
+        validation_defaults = {
+            'time_grid': [0.05, 0.25, 0.5, 0.75, 0.95],
+            'seed': 17_041,
+            'condition_shuffle': True,
+        }
+        validation_defaults.update(validation_config or {})
+        self.validation_time_grid = tuple(
+            float(value) for value in validation_defaults['time_grid']
+        )
+        if not self.validation_time_grid:
+            raise ValueError('validation time_grid must contain at least one value')
+        if any(not 0.0 < value < 1.0 for value in self.validation_time_grid):
+            raise ValueError('validation time_grid values must be strictly between 0 and 1')
+        self.validation_seed = int(validation_defaults['seed'])
+        self.validation_condition_shuffle = bool(
+            validation_defaults['condition_shuffle']
+        )
+
+        atom_count_defaults = {
+            'mode': 'marginal',
+            'bandwidth': 0.15,
+            'nearest_k': 128,
+            'reference_file': None,
+        }
+        atom_count_defaults.update(atom_count_conditioning or {})
+        if atom_count_defaults['mode'] not in {'marginal', 'conditional_kernel'}:
+            raise ValueError(
+                "atom-count mode must be 'marginal' or 'conditional_kernel'"
+            )
+        self.atom_count_conditioning = atom_count_defaults
 
         if self.use_hydrogen_counts:
             if parameterization != 'ctmc':
@@ -160,6 +194,7 @@ class FlowMol(pl.LightningModule):
         
         # construct histogram of number of atoms in each ligand
         self.build_n_atoms_dist(n_atoms_hist_file=self.n_atoms_hist_file)
+        self.build_conditional_n_atoms_sampler()
 
         # create interpolant scheduler and vector field
         self.interpolant_scheduler = InterpolantScheduler(canonical_feat_order=self.canonical_feat_order, 
@@ -327,10 +362,85 @@ class FlowMol(pl.LightningModule):
         self.log('train_total_loss', total_loss, prog_bar=True, on_step=True, sync_dist=True)
 
         return total_loss
-    
+
+    @staticmethod
+    def _seeded_generator(device: torch.device, seed: int) -> torch.Generator:
+        generator_device = device if device.type == 'cuda' else torch.device('cpu')
+        generator = torch.Generator(device=generator_device)
+        generator.manual_seed(int(seed))
+        return generator
+
+    def _total_from_feature_losses(self, losses: Dict[str, torch.Tensor]):
+        total = torch.zeros((), device=next(iter(losses.values())).device)
+        for feat in self.canonical_feat_order:
+            total = total + self.total_loss_weights[feat] * losses[feat]
+        return total
+
+    def deterministic_validation_losses(self, g: dgl.DGLGraph, batch_idx: int):
+        """Evaluate a fixed time/noise grid with conditioning always enabled."""
+
+        losses_by_time = []
+        for grid_idx, time_value in enumerate(self.validation_time_grid):
+            seed = self.validation_seed + batch_idx * len(self.validation_time_grid) + grid_idx
+            generator = self._seeded_generator(g.device, seed)
+            time = torch.full(
+                (g.batch_size,), time_value, device=g.device, dtype=torch.float32
+            )
+            losses_by_time.append(
+                self(
+                    g,
+                    t=time,
+                    corruption_generator=generator,
+                    condition_dropout=False,
+                )
+            )
+
+        mean_losses = {
+            feat: torch.stack([losses[feat] for losses in losses_by_time]).mean()
+            for feat in self.canonical_feat_order
+        }
+        diagnostics = {}
+
+        if (
+            self.validation_condition_shuffle
+            and self.conditional_generation
+            and hasattr(g, 'prop')
+            and g.prop is not None
+            and g.batch_size > 1
+        ):
+            midpoint_idx = min(
+                range(len(self.validation_time_grid)),
+                key=lambda idx: abs(self.validation_time_grid[idx] - 0.5),
+            )
+            time_value = self.validation_time_grid[midpoint_idx]
+            seed = (
+                self.validation_seed
+                + batch_idx * len(self.validation_time_grid)
+                + midpoint_idx
+            )
+            original_property = g.prop
+            try:
+                g.prop = original_property.roll(shifts=1, dims=0)
+                shuffled_losses = self(
+                    g,
+                    t=torch.full(
+                        (g.batch_size,), time_value, device=g.device,
+                        dtype=torch.float32,
+                    ),
+                    corruption_generator=self._seeded_generator(g.device, seed),
+                    condition_dropout=False,
+                )
+            finally:
+                g.prop = original_property
+            diagnostics['condition_shuffle_gain'] = (
+                self._total_from_feature_losses(shuffled_losses)
+                - self._total_from_feature_losses(losses_by_time[midpoint_idx])
+            )
+
+        return mean_losses, diagnostics
+
     def validation_step(self, g: dgl.DGLGraph, batch_idx: int):
-        # compute losses
-        losses = self(g)
+        losses, diagnostics = self.deterministic_validation_losses(g, batch_idx)
 
         # create dictionary of values to log
         val_log_dict = {
@@ -339,6 +449,8 @@ class FlowMol(pl.LightningModule):
 
         for key in losses:
             val_log_dict[f'{key}_val_loss'] = losses[key]
+
+        val_log_dict.update({f'val_{key}': value for key, value in diagnostics.items()})
 
         self.log_dict(val_log_dict, batch_size=g.batch_size, sync_dist=True)
 
@@ -351,7 +463,13 @@ class FlowMol(pl.LightningModule):
 
         return total_loss
     
-    def forward(self, g: dgl.DGLGraph):
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        t: torch.Tensor | None = None,
+        corruption_generator: torch.Generator | None = None,
+        condition_dropout: bool | None = None,
+    ):
         
         batch_size = g.batch_size
         device = g.device
@@ -382,12 +500,21 @@ class FlowMol(pl.LightningModule):
         # g = self.sample_prior(g, node_batch_idx, upper_edge_mask)
 
         # sample timepoints for each molecule in the batch
-        t = torch.rand(batch_size, device=device).float()
+        if t is None:
+            t = torch.rand(
+                batch_size, device=device, generator=corruption_generator
+            ).float()
+        else:
+            t = torch.as_tensor(t, device=device, dtype=torch.float32)
+            if t.ndim == 0:
+                t = t.expand(batch_size)
+            if t.shape != (batch_size,):
+                raise ValueError(f't must have shape ({batch_size},), got {tuple(t.shape)}')
 
         # Get property embeddings if available
         if hasattr(g, 'prop') and self.conditional_generation:
             self.property_embedder = self.property_embedder.to(device) 
-            g.prop = g.prop.unsqueeze(-1)
+            g.prop = g.prop.unsqueeze(-1) if g.prop.dim() == 1 else g.prop
             g.prop = g.prop.to(device)
             prop_emb = self.property_embedder(g.prop)
             # Concatenate with time
@@ -398,7 +525,14 @@ class FlowMol(pl.LightningModule):
             print("no feature is used\n")
 
         # construct interpolated molecules
-        g = self.vector_field.sample_conditional_path(g, t, node_batch_idx, edge_batch_idx, upper_edge_mask)
+        g = self.vector_field.sample_conditional_path(
+            g,
+            t,
+            node_batch_idx,
+            edge_batch_idx,
+            upper_edge_mask,
+            generator=corruption_generator,
+        )
 
         # forward pass for the vector field
         vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask)
@@ -421,7 +555,12 @@ class FlowMol(pl.LightningModule):
                     if self.target_blur == 0.0:
                         target = target.argmax(dim=-1)
                     else:
-                        target = target + torch.randn_like(target)*self.target_blur
+                        target = target + torch.randn(
+                            target.shape,
+                            device=target.device,
+                            dtype=target.dtype,
+                            generator=corruption_generator,
+                        ) * self.target_blur
                         target = fn.softmax(target, dim=-1)
             #  compute the target for vector-field parameterization
             elif self.parameterization == 'vector-field':
@@ -528,10 +667,138 @@ class FlowMol(pl.LightningModule):
         self.n_atoms_dist = torch.distributions.Categorical(probs=n_atoms_prob)
         self.n_atoms_map = n_atoms
 
-    def sample_n_atoms(self, n_molecules: int, **kwargs):
-        """Draw samples from the distribution of the number of atoms in a ligand."""
-        n_atoms = self.n_atoms_dist.sample((n_molecules,), **kwargs)
-        return self.n_atoms_map[n_atoms]
+    def build_conditional_n_atoms_sampler(self):
+        reference_file = self.atom_count_conditioning.get('reference_file')
+        if reference_file is None:
+            reference_file = Path(self.n_atoms_hist_file).with_name(
+                'train_data_processed.pt'
+            )
+        else:
+            reference_file = Path(reference_file)
+            if not reference_file.is_absolute():
+                reference_file = Path(self.n_atoms_hist_file).parent / reference_file
+
+        self.conditional_n_atoms_sampler = None
+        self.atom_count_reference_file = str(reference_file)
+        if reference_file.exists():
+            self.conditional_n_atoms_sampler = (
+                ConditionalAtomCountSampler.from_processed_file(reference_file)
+            )
+        elif self.atom_count_conditioning['mode'] == 'conditional_kernel':
+            raise FileNotFoundError(
+                f'conditional atom-count reference not found: {reference_file}'
+            )
+
+    def _prepare_count_targets(self, properties, n_molecules: int) -> torch.Tensor:
+        if self.conditional_n_atoms_sampler is None:
+            raise RuntimeError('conditional atom-count sampler is not available')
+        condition_dim = self.conditional_n_atoms_sampler.condition_dim
+        targets = torch.as_tensor(properties, dtype=torch.float32, device='cpu')
+        if targets.ndim == 0:
+            targets = targets.reshape(1, 1).expand(n_molecules, condition_dim)
+        elif targets.ndim == 1:
+            if condition_dim == 1 and targets.numel() == n_molecules:
+                targets = targets.unsqueeze(-1)
+            elif targets.numel() == condition_dim:
+                targets = targets.reshape(1, condition_dim).expand(n_molecules, -1)
+            else:
+                raise ValueError(
+                    '1-D count targets must contain one scalar per molecule or '
+                    'one complete condition vector'
+                )
+        elif targets.ndim == 2:
+            if targets.shape != (n_molecules, condition_dim):
+                raise ValueError(
+                    f'count targets must have shape ({n_molecules}, {condition_dim}), '
+                    f'got {tuple(targets.shape)}'
+                )
+        else:
+            raise ValueError('count targets must be scalar, 1-D, or 2-D')
+        return targets
+
+    def sample_n_atoms(
+        self,
+        n_molecules: int,
+        properties=None,
+        mode: str | None = None,
+        bandwidth: float | Sequence[float] | None = None,
+        nearest_k: int | None = None,
+        generator: torch.Generator | None = None,
+    ):
+        """Draw heavy-atom counts from ``p(n)`` or empirical ``p(n | c)``."""
+
+        mode = self.atom_count_conditioning['mode'] if mode in (None, 'model_default') else mode
+        if mode == 'marginal':
+            indices = torch.multinomial(
+                self.n_atoms_dist.probs,
+                num_samples=n_molecules,
+                replacement=True,
+                generator=generator,
+            )
+            self.last_atom_count_diagnostics = {'mode': 'marginal'}
+            return self.n_atoms_map[indices]
+        if mode != 'conditional_kernel':
+            raise ValueError(f'unknown atom-count sampling mode: {mode}')
+        if properties is None:
+            raise ValueError(
+                'conditional_kernel atom-count sampling requires property targets'
+            )
+        targets = self._prepare_count_targets(properties, n_molecules)
+        bandwidth = (
+            self.atom_count_conditioning['bandwidth']
+            if bandwidth is None else bandwidth
+        )
+        nearest_k = (
+            self.atom_count_conditioning.get('nearest_k')
+            if nearest_k is None else nearest_k
+        )
+        samples, diagnostics = self.conditional_n_atoms_sampler.sample(
+            targets,
+            bandwidth,
+            nearest_k=nearest_k,
+            generator=generator,
+            return_diagnostics=True,
+        )
+        self.last_atom_count_diagnostics = {
+            'mode': mode,
+            'effective_sample_size_mean': float(
+                diagnostics.effective_sample_size.mean()
+            ),
+            'nearest_distance_max': float(diagnostics.nearest_distance.max()),
+        }
+        return samples
+
+    def resolve_atom_counts(
+        self,
+        n_molecules: int,
+        device,
+        number_of_atoms=None,
+        properties_for_sampling=None,
+        multiple_properties=None,
+        atom_count_mode: str | None = None,
+        atom_count_bandwidth: float | Sequence[float] | None = None,
+        atom_count_nearest_k: int | None = None,
+        atom_count_generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        if number_of_atoms is not None:
+            counts = torch.as_tensor(number_of_atoms, dtype=torch.long)
+            if counts.ndim != 1 or counts.numel() != n_molecules:
+                raise ValueError(f'number_of_atoms must contain {n_molecules} entries')
+            if (counts <= 0).any():
+                raise ValueError('number_of_atoms entries must be positive')
+            return counts.to(device)
+
+        targets = multiple_properties
+        if targets is None:
+            targets = properties_for_sampling
+        return self.sample_n_atoms(
+            n_molecules,
+            properties=targets,
+            mode=atom_count_mode,
+            bandwidth=atom_count_bandwidth,
+            nearest_k=atom_count_nearest_k,
+            generator=atom_count_generator,
+        ).to(device)
 
     def sample_random_sizes(self, n_molecules: int, device="cuda:0",
         stochasticity=None, high_confidence_threshold=None, 
@@ -543,17 +810,27 @@ class FlowMol(pl.LightningModule):
         properties_handle_method:str=None, # choices ['concatenate', 'sum', 'multiply', 'concatenate_sum', 'concatenate_multiply']
         multilple_values_to_one_property: List[float|int] | None = None,     
         number_of_atoms: List[int]|None = None, 
+        atom_count_mode: str | None = None,
+        atom_count_bandwidth: float | Sequence[float] | None = None,
+        atom_count_nearest_k: int | None = None,
+        atom_count_generator: torch.Generator | None = None,
         **kwargs):
         """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
 
         if multilple_values_to_one_property is not None and properties_for_sampling is not None:
             raise ValueError('You can not provide both multilple_values_to_one_property and properties_for_sampling, only one of them should be provided')
         
-        # get the number of atoms that will be in each molecules
-        if number_of_atoms:
-            atoms_per_molecule = torch.tensor(number_of_atoms).to(device)
-        else:
-            atoms_per_molecule = self.sample_n_atoms(n_molecules).to(device)
+        atoms_per_molecule = self.resolve_atom_counts(
+            n_molecules,
+            device,
+            number_of_atoms=number_of_atoms,
+            properties_for_sampling=properties_for_sampling,
+            multiple_properties=multilple_values_to_one_property,
+            atom_count_mode=atom_count_mode,
+            atom_count_bandwidth=atom_count_bandwidth,
+            atom_count_nearest_k=atom_count_nearest_k,
+            atom_count_generator=atom_count_generator,
+        )
 
         if multilple_values_to_one_property is not None:
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \

@@ -30,6 +30,7 @@ dataset:
   use_hydrogen_counts: true
   n_hydrogen_counts: 4
   raw_data_dir: ../joint_kekule_diffusion/data_hp1kg_nevpt2_official_xyz
+  training_split: train
   use_first_half_training_set: false
 guidance:
   enabled: true
@@ -62,6 +63,15 @@ model_setting:
   properties_handle_method: concatenate_sum
   property_embedding_dim: 256
 mol_fm:
+  atom_count_conditioning:
+    bandwidth: 0.15
+    mode: conditional_kernel
+    nearest_k: 128
+    reference_file: train_data_processed.pt
+  validation_config:
+    condition_shuffle: true
+    seed: 17041
+    time_grid: [0.05, 0.25, 0.5, 0.75, 0.95]
   parameterization: ctmc
   n_hydrogen_counts: 4
   prior_config:

@@ -131,7 +131,15 @@ class CTMCVectorField(EndpointVectorField):
         
         return forward_weight_func
         
-    def sample_conditional_path(self, g, t, node_batch_idx, edge_batch_idx, upper_edge_mask):
+    def sample_conditional_path(
+        self,
+        g,
+        t,
+        node_batch_idx,
+        edge_batch_idx,
+        upper_edge_mask,
+        generator: torch.Generator | None = None,
+    ):
         # sample p(g_t|g_0,g_1)
         # this includes the standard probability path for positions and CTMC probability paths for categorical features
         # t has shape (batch_size,)
@@ -163,7 +171,10 @@ class CTMCVectorField(EndpointVectorField):
             alpha_t_feat = alpha_t[:, feat_idx][node_batch_idx] # has shape (num_nodes,)
 
             # set each node's feature to the mask token with probability 1 - alpha_t
-            xt[ torch.rand(num_nodes, device=device) < 1 - alpha_t_feat ] = self.mask_idxs[feat]
+            mask_draws = torch.rand(
+                num_nodes, device=device, generator=generator
+            )
+            xt[mask_draws < 1 - alpha_t_feat] = self.mask_idxs[feat]
             g.ndata[f'{feat}_t'] = one_hot(xt, num_classes=self.n_cat_feats[feat]+1)
 
         # sample categorical edge features
@@ -172,7 +183,10 @@ class CTMCVectorField(EndpointVectorField):
         e_idx = self.canonical_feat_order.index('e')
         alpha_t_e = alpha_t[:, e_idx][edge_batch_idx][upper_edge_mask]
         et_upper = g.edata['e_1_true'][upper_edge_mask].argmax(-1)
-        et_upper[ torch.rand(num_edges, device=device) < 1 - alpha_t_e ] = self.mask_idxs['e']
+        edge_mask_draws = torch.rand(
+            num_edges, device=device, generator=generator
+        )
+        et_upper[edge_mask_draws < 1 - alpha_t_e] = self.mask_idxs['e']
         
         n,d = g.edata['e_1_true'].shape
         e_t = torch.zeros((n,d+1), dtype=g.edata['e_1_true'].dtype, device=g.device)

@@ -472,7 +472,15 @@ class EndpointVectorField(nn.Module):
         return vf
 
 
-    def sample_conditional_path(self, g, t, node_batch_idx, edge_batch_idx, upper_edge_mask):
+    def sample_conditional_path(
+        self,
+        g,
+        t,
+        node_batch_idx,
+        edge_batch_idx,
+        upper_edge_mask,
+        generator: torch.Generator | None = None,
+    ):
         """Interpolate between the prior and true terminal state of the ligand."""
         # upper_edge_mask is not used here but it is needed for DirichletVectorField and we need to keep consistent
         # function signatures across vector field classes so that MolFM can use them interchangeably
@@ -563,7 +571,15 @@ class DirichletVectorField(EndpointVectorField):
     def alpha_to_w(self, alpha_t):
         return alpha_t*self.w_max + 1
 
-    def sample_conditional_path(self, g, t, node_batch_idx, edge_batch_idx, upper_edge_mask):
+    def sample_conditional_path(
+        self,
+        g,
+        t,
+        node_batch_idx,
+        edge_batch_idx,
+        upper_edge_mask,
+        generator: torch.Generator | None = None,
+    ):
         """Interpolate between the prior and true terminal state of the ligand."""
         # TODO: this computation could be made more efficient by concatenating node features and edge features into a single tensor and then interpolate them all at once before splitting them back up
         alpha_t = self.interpolant_scheduler.alpha_t(t) # has shape (n_timepoints, n_feats)

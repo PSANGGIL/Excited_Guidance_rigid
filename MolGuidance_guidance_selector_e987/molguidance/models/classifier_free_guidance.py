@@ -1,4 +1,4 @@
-from typing import Dict, List, Union, Callable, Optional
+from typing import Dict, List, Union, Callable, Optional, Sequence
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
@@ -134,7 +134,12 @@ class SetEmbeddingType:
         """
         self.p_unconditional = p_unconditional
     
-    def __call__(self, g: dgl.DGLGraph) -> dgl.DGLGraph:
+    def __call__(
+        self,
+        g: dgl.DGLGraph,
+        enabled: bool = True,
+        generator: torch.Generator | None = None,
+    ) -> dgl.DGLGraph:
         """
         Creates and sets the unconditional embedding mask for the graph.
         
@@ -151,9 +156,12 @@ class SetEmbeddingType:
         batch_size = g.batch_size
         device = g.device
         
-        # Generate random mask where True = use unconditional embedding
-        # Shape: [batch_size, 1]
-        mask = torch.rand(batch_size, 1, device=device) <= self.p_unconditional
+        if enabled:
+            mask = torch.rand(
+                batch_size, 1, device=device, generator=generator
+            ) <= self.p_unconditional
+        else:
+            mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
         
         # Add the mask to the graph
         g._USE_UNCONDITIONAL_EMBEDDING = mask
@@ -196,7 +204,13 @@ class ClassifierFreeGuidance(FlowMol):
                                             conditional_generation=self.conditional_generation,
                                             dataset_name=self.dataset_name,
                                             **vector_field_config)
-    def forward(self, g: dgl.DGLGraph):
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        t: torch.Tensor | None = None,
+        corruption_generator: torch.Generator | None = None,
+        condition_dropout: bool | None = None,
+    ):
         """
         Modified forward pass that handles both conditional and unconditional embeddings.
         
@@ -217,12 +231,22 @@ class ClassifierFreeGuidance(FlowMol):
         # Create a mask which selects all of the upper triangle edges from the batched graph
         upper_edge_mask = get_upper_edge_mask(g)
 
-        # Sample timepoints for each molecule in the batch
-        t = torch.rand(batch_size).float().to(device)
+        if t is None:
+            t = torch.rand(
+                batch_size, device=device, generator=corruption_generator
+            ).float()
+        else:
+            t = torch.as_tensor(t, device=device, dtype=torch.float32)
+            if t.ndim == 0:
+                t = t.expand(batch_size)
+            if t.shape != (batch_size,):
+                raise ValueError(f't must have shape ({batch_size},), got {tuple(t.shape)}')
 
-        # For training with CFG, generate masks for conditional vs unconditional embeddings
-        # Apply embedding controller to generate mask
-        g = self.embedding_controller(g)
+        if condition_dropout is None:
+            condition_dropout = self.training
+        g = self.embedding_controller(
+            g, enabled=condition_dropout, generator=corruption_generator
+        )
 
         # Make sure prop has correct shape
         g.prop = g.prop.unsqueeze(-1) if g.prop.dim() == 1 else g.prop
@@ -246,7 +270,14 @@ class ClassifierFreeGuidance(FlowMol):
         t_combined = t_combined.to(device)
 
         # construct interpolated molecules
-        g = self.vector_field.sample_conditional_path(g, t, node_batch_idx, edge_batch_idx, upper_edge_mask)
+        g = self.vector_field.sample_conditional_path(
+            g,
+            t,
+            node_batch_idx,
+            edge_batch_idx,
+            upper_edge_mask,
+            generator=corruption_generator,
+        )
 
         # forward pass for the vector field
         vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask)
@@ -270,7 +301,12 @@ class ClassifierFreeGuidance(FlowMol):
                 if self.target_blur == 0.0:
                     target = target.argmax(dim=-1)
                 else:
-                    target = target + torch.randn_like(target)*self.target_blur
+                    target = target + torch.randn(
+                        target.shape,
+                        device=target.device,
+                        dtype=target.dtype,
+                        generator=corruption_generator,
+                    ) * self.target_blur
                     target = F.softmax(target, dim=-1)
 
             # for CTMC parameterization, we do not apply loss on already unmasked features
@@ -429,6 +465,9 @@ class ClassifierFreeGuidance(FlowMol):
         properties_handle_method:str=None, 
         multilple_values_to_one_property: List[float|int] | None = None,  
         number_of_atoms: List[int]|None = None, 
+        atom_count_mode: str | None = None,
+        atom_count_bandwidth: float | Sequence[float] | None = None,
+        atom_count_nearest_k: int | None = None,
         guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0}, 
         dfm_type='campbell_rate_matrix',  
         guidance_format: str = "log", 
@@ -444,11 +483,16 @@ class ClassifierFreeGuidance(FlowMol):
         if multilple_values_to_one_property is not None and properties_for_sampling is not None:
             raise ValueError('You can not provide both multilple_values_to_one_property and properties_for_sampling, only one of them should be provided')
 
-        # get the number of atoms that will be in each molecules
-        if number_of_atoms:
-            atoms_per_molecule = torch.tensor(number_of_atoms).to(device)
-        else:
-            atoms_per_molecule = self.sample_n_atoms(n_molecules).to(device)
+        atoms_per_molecule = self.resolve_atom_counts(
+            n_molecules,
+            device,
+            number_of_atoms=number_of_atoms,
+            properties_for_sampling=properties_for_sampling,
+            multiple_properties=multilple_values_to_one_property,
+            atom_count_mode=atom_count_mode,
+            atom_count_bandwidth=atom_count_bandwidth,
+            atom_count_nearest_k=atom_count_nearest_k,
+        )
 
         if multilple_values_to_one_property is not None:
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \

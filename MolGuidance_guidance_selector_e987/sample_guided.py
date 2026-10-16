@@ -92,6 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--n-atoms-per-mol", "--n_atoms_per_mol", type=int, default=None
     )
     sampling.add_argument("--n-timesteps", "--n_timesteps", type=int, default=100)
+    sampling.add_argument("--seed", type=int, default=0)
+    sampling.add_argument(
+        "--atom-count-mode", "--atom_count_mode",
+        choices=["model_default", "marginal", "conditional_kernel"],
+        default="model_default",
+    )
+    sampling.add_argument(
+        "--atom-count-bandwidth", "--atom_count_bandwidth", type=float,
+        default=None,
+    )
+    sampling.add_argument(
+        "--atom-count-nearest-k", "--atom_count_nearest_k", type=int,
+        default=None,
+    )
     sampling.add_argument("--stochasticity", type=float, default=None)
     sampling.add_argument("--hc-thresh", "--hc_thresh", type=float, default=None)
     sampling.add_argument("--xt-traj", "--xt_traj", action="store_true")
@@ -227,6 +241,12 @@ def validate_args(args: argparse.Namespace) -> str:
         errors.append("--max-batch-size must be positive")
     if args.n_timesteps < 2:
         errors.append("--n-timesteps must be at least 2")
+    if args.atom_count_bandwidth is not None and args.atom_count_bandwidth <= 0:
+        errors.append("--atom-count-bandwidth must be positive")
+    if args.atom_count_nearest_k is not None and args.atom_count_nearest_k <= 0:
+        errors.append("--atom-count-nearest-k must be positive")
+    if args.atom_count_mode == "conditional_kernel" and args.n_atoms_per_mol is not None:
+        errors.append("conditional atom-count mode cannot be combined with fixed atom count")
     if args.n_atoms_per_mol is not None and args.n_atoms_per_mol <= 0:
         errors.append("--n-atoms-per-mol must be positive")
     if args.n_atoms_per_mol is not None and args.number_of_atoms_file is not None:
@@ -377,6 +397,12 @@ def build_dispatch(args: argparse.Namespace) -> tuple[str, list[str]]:
         ]
 
     if method in {"cfg", "ag"}:
+        if method == "cfg":
+            _append_value(forwarded, "--seed", args.seed)
+            _append_value(forwarded, "--atom_count_mode", args.atom_count_mode)
+            _append_value(forwarded, "--atom_count_bandwidth", args.atom_count_bandwidth)
+            _append_value(forwarded, "--atom_count_nearest_k", args.atom_count_nearest_k)
+
         default_scale = 2.0
         for feature in FEATURES:
             value = getattr(args, f"guide_w_{feature}")

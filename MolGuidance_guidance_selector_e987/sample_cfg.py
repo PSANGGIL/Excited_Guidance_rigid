@@ -32,6 +32,15 @@ def parse_arguments():
                         help="Number of atoms per molecule (if fixed)")
     parser.add_argument("--n_timesteps", type=int, default=100,
                         help="Number of timesteps for sampling")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for count and reverse-process sampling")
+    parser.add_argument("--atom_count_mode", type=str, default="model_default",
+                        choices=["model_default", "marginal", "conditional_kernel"],
+                        help="How to sample heavy-atom counts when size is not fixed")
+    parser.add_argument("--atom_count_bandwidth", type=float, default=None,
+                        help="Raw-property kernel bandwidth for conditional counts")
+    parser.add_argument("--atom_count_nearest_k", type=int, default=None,
+                        help="Optional nearest training records used by conditional counts")
     
     # Trajectory and metrics options
     parser.add_argument("--xt_traj", action="store_true",
@@ -101,6 +110,8 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     # Set device
     if args.gpu >= 0 and torch.cuda.is_available():
@@ -178,6 +189,9 @@ def main():
                 properties_handle_method=args.properties_handle_method,
                 multilple_values_to_one_property=batch_property,
                 number_of_atoms=batch_no_of_atoms,
+                atom_count_mode=args.atom_count_mode,
+                atom_count_bandwidth=args.atom_count_bandwidth,
+                atom_count_nearest_k=args.atom_count_nearest_k,
                 guide_w=guide_w,
                 dfm_type=args.dfm_type,
                 guidance_format=args.guidance_format,

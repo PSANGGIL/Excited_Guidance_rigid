@@ -22,13 +22,22 @@ class MoleculeDataModule(pl.LightningDataModule):
     def setup(self, stage: str):
 
         if stage == 'fit':
-            # self.train_dataset = self.load_dataset('train')
             self.val_dataset = self.load_dataset('val')
             self.test_dataset = self.load_dataset('test')
-            if self.dataset_config['use_first_half_training_set'] == True:
-                self.train_dataset = self.load_dataset('train_a')
+
+            explicit_split = self.dataset_config.get('training_split')
+            if explicit_split is not None:
+                if explicit_split not in {'train', 'train_a', 'train_b'}:
+                    raise ValueError(
+                        "training_split must be one of 'train', 'train_a', or 'train_b'"
+                    )
+                training_split = explicit_split
+            elif self.dataset_config.get('use_first_half_training_set', False):
+                training_split = 'train_a'
             else:
-                self.train_dataset = self.load_dataset('train_b')
+                training_split = 'train_b'
+            self.training_split = training_split
+            self.train_dataset = self.load_dataset(training_split)
 
     def load_dataset(self, dataset_name: str):
         return MoleculeDataset(dataset_name, self.dataset_config, prior_config=self.prior_config)
