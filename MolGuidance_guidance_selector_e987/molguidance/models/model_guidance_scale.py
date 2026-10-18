@@ -125,9 +125,7 @@ class ModelGuidance(FlowMol):
         for key in losses:
             train_log_dict[f'{key}_train_loss'] = losses[key]
 
-        total_loss = torch.zeros(1, device=g.device, requires_grad=True)
-        for feat in self.canonical_feat_order:
-            total_loss = total_loss + self.total_loss_weights[feat]*losses[feat]
+        total_loss = self._total_from_feature_losses(losses)
 
         self.log_dict(train_log_dict, sync_dist=True)
         self.log('train_total_loss', total_loss, prog_bar=True, on_step=True, sync_dist=True)
@@ -159,9 +157,7 @@ class ModelGuidance(FlowMol):
         self.log_dict(val_log_dict, batch_size=g.batch_size, sync_dist=True)
 
         # combine individual losses into a total loss
-        total_loss = torch.zeros(1, device=g.device, requires_grad=False)
-        for feat in self.canonical_feat_order:
-            total_loss = total_loss + self.total_loss_weights[feat]*losses[feat]
+        total_loss = self._total_from_feature_losses(losses)
 
         self.log('val_total_loss', total_loss, prog_bar=True, batch_size=g.batch_size, on_step=True, sync_dist=True)
 
@@ -372,6 +368,11 @@ class ModelGuidance(FlowMol):
                     losses[feat], weight
                 )
 
+        losses.update(
+            self.compute_chemistry_auxiliary_losses(
+                g, vf_output, upper_edge_mask, t
+            )
+        )
         return losses
 
     @torch.no_grad()

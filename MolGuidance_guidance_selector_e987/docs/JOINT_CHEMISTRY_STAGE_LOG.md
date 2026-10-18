@@ -209,3 +209,154 @@ generation quality. The reverse smoke model was untrained and only validates
 shape, support, mask termination, and code-path consistency. Long training is
 deferred until the subsequent chemistry losses and self-correction stages have
 their own independent regression checks.
+
+## Stage 3: differentiable joint-chemistry consistency
+
+### Motivation and design boundary
+
+Stage 2 removes impossible independent atom-state combinations but its endpoint
+cross-entropies are local marginals. They do not directly penalize a prediction
+in which individually plausible atoms and bonds form an over-valent,
+disconnected, or non-Kekulizable graph. MiDi, MolDiff, JODO, and DiGress all
+motivate learning atom and edge chemistry jointly rather than repairing an
+independently sampled adjacency only after reverse diffusion.
+
+- MiDi: <https://arxiv.org/abs/2302.09048>
+- MolDiff: <https://arxiv.org/abs/2305.07508>
+- JODO: <https://arxiv.org/abs/2305.12347>
+- DiGress: <https://arxiv.org/abs/2209.14734>
+
+This stage adds differentiable endpoint objectives only. It deliberately does
+not add a hard intermediate projector, a second edge head, or a new sampler.
+Consequently the CTMC forward kernel and reverse state space remain exactly the
+Stage-2 x/s/e process.
+
+### Effective CTMC endpoint
+
+For an entry that is still masked at time t, the chemistry objective uses the
+model endpoint probability. For an already revealed entry it uses the observed
+one-hot state. Thus
+
+p_eff = 1[masked] p_theta(x_1 | x_t,c) + 1[known] one_hot(x_t).
+
+This is essential: applying every global term to predictions for already known
+entries would create a duplicate copy objective and would disagree with the
+masked-only CTMC cross-entropy.
+
+### Added objectives
+
+1. **Balanced edge existence.** From the same four-way edge softmax,
+   p(edge)=1-p(NONE). Positive and negative masked pairs are averaged
+   separately and then equally combined. No inconsistent second edge head is
+   introduced.
+2. **Joint-state-aware heavy valence.** The expected bond-order degree is
+   v_i=sum_j sum_b order(b) p_eff(e_ij=b). For each atom state, loss is the
+   squared distance to its closest heavy valence observed in the training
+   split, followed by expectation over p_eff(s_i). Using an allowed set
+   instead of a frequency-weighted mean avoids penalizing rare but valid P/S
+   valences.
+3. **Molecular charge.** The predicted total formal charge is matched to the
+   target total charge with squared error divided by atom count. It does not
+   force every atom neutral, so charged and zwitterionic extensions remain
+   representable.
+4. **Connectivity backbone.** For every true edge the converter stores its
+   uniform-spanning-tree inclusion probability, equal to effective resistance
+   in the unweighted molecular graph. The loss is a weighted
+   -log p_eff(edge) backbone objective. Bridges receive weight one while
+   symmetry-equivalent cycle edges share weight. Foster's identity
+   sum_e R_eff(e)=n-1 is checked for every molecule.
+5. **Aromatic/Kekule consistency.** Aromatic perimeter edges maximize
+   p(SINGLE)+p(DOUBLE). A second term matches each aromatic atom's expected
+   incident-double-bond degree to the target degree. This permits alternative
+   Kekule matchings that preserve local degree instead of forcing one arbitrary
+   alternating edge assignment.
+
+All auxiliary reductions use mean(w_t * loss) when time-scaled loss is
+enabled. An earlier draft divided by sum(w_t), which would cancel a common
+timestep factor; a regression test now prevents that error.
+
+### Data and configuration changes
+
+- Metadata version 2 stores training-only heavy-valence counts for all 37
+  lossless joint states. The held-out-only state retains an empty count map and
+  is excluded from generative support.
+- Processed molecular bonds now carry aligned bond_connectivity_weights and
+  bond_aromatic_flags.
+- Dataset packing maps both fields onto exactly the same complete upper/lower
+  edge order as e_1_true.
+- Enabling chemistry loss requires require_chemistry_auxiliary_labels: true.
+  Schema validation rejects legacy data/config combinations before training.
+- The isolated configuration is
+  configs/local/guidance_est/hp1kg_est_cfg_joint_kekule_stage3_chemistry.yaml.
+  Its initial weights are edge existence 0.5, valence 0.05, charge 0.05,
+  connectivity 0.25, and aromatic 0.2. The lower valence weight follows a
+  production smoke measurement rather than assuming equal raw scales.
+- The converted tensors are stored separately in
+  molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz;
+  Stage-2 data and background outputs are untouched.
+
+### Invariants and conflict checks
+
+- The network architecture, endpoint vocabulary, CTMC corruption, and reverse
+  sampler are unchanged. Stage-2 and Stage-3 models have identical 634
+  state-dict tensor names and shapes; the auxiliary module has no persistent
+  parameters or buffers.
+- The training objective changes, so a fresh run is still preferred for a clean
+  stage ablation even though a Stage-2 checkpoint can be structurally loaded.
+- Base FlowMol, CFG, and MG call the same chemistry function and the same total
+  loss reducer. An enabled loss missing from the returned dictionary raises
+  instead of being silently omitted.
+- Deterministic validation averages the full returned loss-key set, not only
+  canonical x/s/e, and condition-shuffle gain includes enabled chemistry
+  terms.
+- Existing Stage-1/2 and legacy modes default to all auxiliary weights zero.
+  They do not require the new tensors or metadata and preserve strict
+  checkpoint loading.
+- Connectivity and aromatic labels are training objectives only. Reverse
+  sampling does not require target-only fields, so no target leakage enters
+  generation.
+- The objectives remain soft surrogates. They improve gradients but do not
+  mathematically guarantee a connected, valence-valid sample; that distinction
+  is retained for later sampler/projection evaluation.
+
+### Verification (2026-10-18)
+
+- Full conversion retained RDKit identity 1581/1581:
+  train 1264, validation 158, test 159.
+- Every molecule was connected. Per-molecule Foster error was at most
+  7.63e-6; UST weights stayed in [0.55652, 1.0].
+- Stored aromatic-edge counts were train/validation/test
+  17333/2170/2453, and both auxiliary edge tensors matched bond tensors
+  exactly.
+- Independent post-conversion audit rechecked metadata support, all tensor
+  lengths, and sum_e weight_e=n-1 molecule by molecule.
+- A production-size six-atom CFG forward/backward at t=0.5 was finite.
+  Raw losses were x=0.18707, s=1.87260, e=0.94220,
+  edge existence 1.03049, valence 13.89089, charge 0.00252,
+  connectivity 0.09392, and aromatic 0 for this non-aromatic sample.
+  Gradient norm was finite at 179.70. With committed weights the auxiliary
+  contribution is about 1.23 versus about 4.32 from weighted x/s/e on
+  this smoke example.
+- A reduced real MG model returned all eight expected loss keys, all finite,
+  and completed backward with non-zero node-head gradient.
+- Benzene oracle logits gave all five auxiliary losses below 1e-6.
+  Removing all bonds increased existence, valence, connectivity, and aromatic
+  losses. Predicting an all-single aromatic perimeter also increased the
+  aromatic loss, confirming the local Kekule-degree term is active.
+- Random logits produced finite, non-zero node and edge gradients. Fully
+  revealed CTMC entries produced zero auxiliary loss independently of endpoint
+  logits.
+- Cycle and tree tests recovered UST weights 5/6 and 1, respectively.
+- A held-out-state logit of 1000 still produced a normalized supported-state
+  distribution with exactly zero held-out probability, covering the previous
+  unsupported-class underflow/NaN failure mode.
+- The final repository suite passed all 37 tests, and all changed Python files
+  passed byte compilation and git diff --check.
+
+### Interpretation limit
+
+This stage validates objective wiring and mathematical invariants, not improved
+generation. The loss weights are safe initial scales from an untrained smoke
+batch, not an optimized Pareto point. Long training remains deferred until the
+next isolated self-conditioning/recycling stage is implemented and checked for
+train-sample consistency.

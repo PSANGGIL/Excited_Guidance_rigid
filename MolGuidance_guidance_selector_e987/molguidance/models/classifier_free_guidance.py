@@ -358,6 +358,11 @@ class ClassifierFreeGuidance(FlowMol):
                     losses[feat], weight
                 )
 
+        losses.update(
+            self.compute_chemistry_auxiliary_losses(
+                g, vf_output, upper_edge_mask, t
+            )
+        )
         return losses        
 
     @torch.no_grad()

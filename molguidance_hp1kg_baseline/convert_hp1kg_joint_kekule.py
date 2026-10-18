@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import pickle
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=Path(
-            "molguidance_hp1kg_baseline/data_est_joint_kekule_official_xyz"
+            "molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz"
         ),
     )
     parser.add_argument("--property", choices=("s1", "t1", "est"), default="est")
@@ -88,8 +89,27 @@ def build_atom_state_metadata(
     union_states = sorted(set().union(*split_states.values()))
     state_to_idx = {state: idx for idx, state in enumerate(union_states)}
     train_states = split_states["train"]
+
+    train_valence_counts: dict[tuple[int, int, int], Counter[int]] = {
+        state: Counter() for state in union_states
+    }
+    for record_idx, record in enumerate(split_records["train"]):
+        states = atom_state_keys(record)
+        kekule = torch.as_tensor(record["kekule_bonds"], dtype=torch.int64)
+        if kekule.shape != (len(states), len(states)):
+            raise ValueError(
+                f"train record {record_idx}: Kekule matrix and atom states disagree"
+            )
+        heavy_valences = kekule.sum(dim=1)
+        for state, valence in zip(states, heavy_valences.tolist()):
+            if valence < 0:
+                raise ValueError(
+                    f"train record {record_idx}: negative heavy-atom valence"
+                )
+            train_valence_counts[state][int(valence)] += 1
+
     metadata = {
-        "version": 1,
+        "version": 2,
         "definition": "(element, formal_charge, attached_hydrogen_count)",
         "states": [
             {
@@ -97,6 +117,12 @@ def build_atom_state_metadata(
                 "symbol": atom_map[atom_type],
                 "formal_charge": charge,
                 "hydrogens": hydrogens,
+                "train_heavy_valence_counts": {
+                    str(valence): count
+                    for valence, count in sorted(
+                        train_valence_counts[(atom_type, charge, hydrogens)].items()
+                    )
+                },
             }
             for atom_type, charge, hydrogens in union_states
         ],
@@ -107,6 +133,48 @@ def build_atom_state_metadata(
     }
     return metadata, state_to_idx
 
+
+def uniform_spanning_tree_edge_weights(kekule: torch.Tensor) -> torch.Tensor:
+    """Return UST edge-inclusion probabilities via effective resistance.
+
+    For an unweighted connected graph, P(edge in a uniform spanning tree) is
+    the edge effective resistance. Foster's theorem then gives a total weight
+    of n-1, providing a strong per-molecule integrity check.
+    """
+    kekule = torch.as_tensor(kekule, dtype=torch.int64)
+    if kekule.ndim != 2 or kekule.shape[0] != kekule.shape[1]:
+        raise ValueError("Kekule adjacency must be square")
+    if not torch.equal(kekule, kekule.T):
+        raise ValueError("Kekule adjacency must be symmetric")
+    n_atoms = kekule.shape[0]
+    adjacency = (kekule > 0).to(torch.float64)
+    adjacency.fill_diagonal_(0.0)
+    if n_atoms <= 1:
+        return torch.zeros_like(adjacency, dtype=torch.float32)
+
+    laplacian = torch.diag(adjacency.sum(dim=1)) - adjacency
+    rank = int(torch.linalg.matrix_rank(laplacian, hermitian=True))
+    if rank != n_atoms - 1:
+        raise ValueError(
+            f"molecular graph must be connected, Laplacian rank {rank} != {n_atoms - 1}"
+        )
+    laplacian_pinv = torch.linalg.pinv(laplacian, hermitian=True)
+    diagonal = torch.diagonal(laplacian_pinv)
+    resistance = (
+        diagonal[:, None]
+        + diagonal[None, :]
+        - 2.0 * laplacian_pinv
+    )
+    resistance = 0.5 * (resistance + resistance.T)
+    weights = torch.where(adjacency.bool(), resistance.clamp_min(0.0), 0.0)
+    foster_sum = float(torch.triu(weights, diagonal=1).sum())
+    if abs(foster_sum - (n_atoms - 1)) > 1.0e-6 * max(1, n_atoms):
+        raise ValueError(
+            f"effective-resistance Foster sum {foster_sum} != {n_atoms - 1}"
+        )
+    if bool((weights > 1.0 + 1.0e-6).any()):
+        raise ValueError("UST edge-inclusion probability exceeds one")
+    return weights.to(torch.float32)
 
 def canonical_smiles(mol: Chem.Mol) -> str:
     return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
@@ -167,12 +235,17 @@ def convert_records(
     atom_states: list[torch.Tensor] = []
     bond_types: list[torch.Tensor] = []
     bond_idxs: list[torch.Tensor] = []
+    bond_connectivity_weights: list[torch.Tensor] = []
+    bond_aromatic_flags: list[torch.Tensor] = []
     properties: list[float] = []
     smiles: list[str] = []
     node_lengths: list[int] = []
     edge_lengths: list[int] = []
     aromatic_molecules = 0
     identity_matches = 0
+    foster_sum_error_max = 0.0
+    connectivity_weight_min = float("inf")
+    connectivity_weight_max = 0.0
 
     for record_idx, record in enumerate(records):
         pos = torch.as_tensor(record["atom_positions"], dtype=torch.float32)
@@ -190,6 +263,10 @@ def convert_records(
             raise ValueError(f"record {record_idx}: node arrays do not align")
         if kekule.shape != (n_atoms, n_atoms) or not torch.equal(kekule, kekule.T):
             raise ValueError(f"record {record_idx}: invalid Kekule adjacency")
+        if aromatic.shape != (n_atoms, n_atoms) or not torch.equal(aromatic, aromatic.T):
+            raise ValueError(f"record {record_idx}: invalid aromatic adjacency")
+        if bool((aromatic & (kekule == 0)).any()):
+            raise ValueError(f"record {record_idx}: aromatic flag on a non-bond")
         if kekule.min() < 0 or kekule.max() >= N_BOND_TYPES:
             raise ValueError(f"record {record_idx}: unsupported Kekule bond class")
         if type_idx.min() < 0 or type_idx.max() >= len(atom_map):
@@ -223,6 +300,20 @@ def convert_records(
         upper = torch.triu(kekule, diagonal=1)
         edge_index = upper.nonzero(as_tuple=False).to(torch.int32)
         edge_type = upper[edge_index[:, 0], edge_index[:, 1]].to(torch.int32)
+        connectivity_matrix = uniform_spanning_tree_edge_weights(kekule)
+        edge_connectivity = connectivity_matrix[
+            edge_index[:, 0], edge_index[:, 1]
+        ]
+        edge_aromatic = aromatic[edge_index[:, 0], edge_index[:, 1]]
+        foster_error = abs(float(edge_connectivity.sum()) - max(0, n_atoms - 1))
+        foster_sum_error_max = max(foster_sum_error_max, foster_error)
+        if edge_connectivity.numel():
+            connectivity_weight_min = min(
+                connectivity_weight_min, float(edge_connectivity.min())
+            )
+            connectivity_weight_max = max(
+                connectivity_weight_max, float(edge_connectivity.max())
+            )
 
         positions.append(pos)
         atom_types.append(one_hot(type_idx, num_classes=len(atom_map)).to(torch.bool))
@@ -231,6 +322,8 @@ def convert_records(
         atom_states.append(state_indices)
         bond_types.append(edge_type)
         bond_idxs.append(edge_index)
+        bond_connectivity_weights.append(edge_connectivity)
+        bond_aromatic_flags.append(edge_aromatic)
         properties.append(property_value(record, property_name))
         smiles.append(str(record["smiles"]))
         node_lengths.append(n_atoms)
@@ -246,6 +339,10 @@ def convert_records(
         "atom_states": torch.cat(atom_states, dim=0),
         "bond_types": torch.cat(bond_types, dim=0),
         "bond_idxs": torch.cat(bond_idxs, dim=0),
+        "bond_connectivity_weights": torch.cat(
+            bond_connectivity_weights, dim=0
+        ),
+        "bond_aromatic_flags": torch.cat(bond_aromatic_flags, dim=0),
         "node_idx_array": index_ranges(node_lengths),
         "edge_idx_array": index_ranges(edge_lengths),
         "properties": torch.tensor(properties, dtype=torch.float32),
@@ -262,6 +359,12 @@ def convert_records(
         "aromatic_molecules": aromatic_molecules,
         "oracle_identity_matches": identity_matches,
         "oracle_identity_fraction": identity_matches / len(records),
+        "foster_sum_error_max": foster_sum_error_max,
+        "connectivity_weight_min": (
+            0.0 if connectivity_weight_min == float("inf")
+            else connectivity_weight_min
+        ),
+        "connectivity_weight_max": connectivity_weight_max,
     }
     return data, stats
 

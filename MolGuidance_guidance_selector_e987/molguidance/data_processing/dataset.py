@@ -34,6 +34,9 @@ class MoleculeDataset(torch.utils.data.Dataset):
         )
         self.n_atom_states = int(dataset_config.get('n_atom_states', 0))
         self.n_bond_types = int(dataset_config.get('n_bond_types', 5))
+        self.require_chemistry_auxiliary_labels = bool(
+            dataset_config.get('require_chemistry_auxiliary_labels', False)
+        )
         if self.use_joint_atom_state and self.n_atom_states <= 0:
             raise ValueError(
                 'n_atom_states must be positive when joint atom state is enabled'
@@ -45,6 +48,13 @@ class MoleculeDataset(torch.utils.data.Dataset):
         if self.n_bond_types <= 1:
             raise ValueError(
                 'n_bond_types must include NONE and at least one bond'
+            )
+        if self.require_chemistry_auxiliary_labels and (
+            not self.use_joint_atom_state or self.n_bond_types != 4
+        ):
+            raise ValueError(
+                'chemistry auxiliary labels require joint atom states and '
+                'four Kekule edge classes'
             )
         self.n_hydrogen_counts = int(dataset_config.get('n_hydrogen_counts', 0))
         if self.use_hydrogen_counts and self.n_hydrogen_counts <= 0:
@@ -127,6 +137,26 @@ class MoleculeDataset(torch.utils.data.Dataset):
                 raise ValueError('atom_hydrogens contains a class outside n_hydrogen_counts')
         self.bond_types = data_dict['bond_types']
         self.bond_idxs = data_dict['bond_idxs']
+        self.bond_connectivity_weights = data_dict.get(
+            'bond_connectivity_weights'
+        )
+        self.bond_aromatic_flags = data_dict.get('bond_aromatic_flags')
+        if self.require_chemistry_auxiliary_labels and (
+            self.bond_connectivity_weights is None
+            or self.bond_aromatic_flags is None
+        ):
+            raise ValueError(
+                f'Chemistry auxiliary labels requested, but {data_file} lacks '
+                'bond_connectivity_weights or bond_aromatic_flags'
+            )
+        for name, values in (
+            ('bond_connectivity_weights', self.bond_connectivity_weights),
+            ('bond_aromatic_flags', self.bond_aromatic_flags),
+        ):
+            if values is not None and values.shape != self.bond_types.shape:
+                raise ValueError(
+                    f'{name} must align one-to-one with stored molecular bonds'
+                )
         self.node_idx_array = data_dict['node_idx_array']
         self.edge_idx_array = data_dict['edge_idx_array']
         self.dataset = dataset_config['dataset_name']
@@ -173,6 +203,14 @@ class MoleculeDataset(torch.utils.data.Dataset):
         # get data pertaining to edges for this molecule
         bond_types = self.bond_types[edge_start_idx:edge_end_idx].int()
         bond_idxs = self.bond_idxs[edge_start_idx:edge_end_idx].long()
+        if self.bond_connectivity_weights is not None:
+            bond_connectivity_weights = self.bond_connectivity_weights[
+                edge_start_idx:edge_end_idx
+            ].float()
+        if self.bond_aromatic_flags is not None:
+            bond_aromatic_flags = self.bond_aromatic_flags[
+                edge_start_idx:edge_end_idx
+            ].bool()
 
         # reconstruct adjacency matrix
         n_atoms = positions.shape[0]
@@ -208,6 +246,32 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         # add edge features
         g.edata['e_1_true'] = edge_labels
+        if self.bond_connectivity_weights is not None:
+            connectivity_matrix = torch.zeros(
+                (n_atoms, n_atoms), dtype=torch.float32
+            )
+            connectivity_matrix[bond_idxs[:, 0], bond_idxs[:, 1]] = (
+                bond_connectivity_weights
+            )
+            upper_connectivity = connectivity_matrix[
+                upper_edge_idxs[0], upper_edge_idxs[1]
+            ]
+            g.edata['e_connectivity_weight'] = torch.cat(
+                (upper_connectivity, upper_connectivity)
+            )
+        if self.bond_aromatic_flags is not None:
+            aromatic_matrix = torch.zeros(
+                (n_atoms, n_atoms), dtype=torch.bool
+            )
+            aromatic_matrix[bond_idxs[:, 0], bond_idxs[:, 1]] = (
+                bond_aromatic_flags
+            )
+            upper_aromatic = aromatic_matrix[
+                upper_edge_idxs[0], upper_edge_idxs[1]
+            ]
+            g.edata['e_aromatic_true'] = torch.cat(
+                (upper_aromatic, upper_aromatic)
+            )
 
         # add node features
         g.ndata['x_1_true'] = positions

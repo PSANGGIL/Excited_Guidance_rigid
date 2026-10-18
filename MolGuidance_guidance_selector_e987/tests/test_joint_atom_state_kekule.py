@@ -200,6 +200,16 @@ class JointAtomStateKekuleTests(unittest.TestCase):
         config['mol_fm']['n_bond_types'] = 4
         validate_chemistry_schema(config)
 
+        config['mol_fm']['chemistry_auxiliary'] = {
+            'edge_existence_weight': 0.5
+        }
+        with self.assertRaisesRegex(
+            ValueError, 'require_chemistry_auxiliary_labels'
+        ):
+            validate_chemistry_schema(config)
+        config['dataset']['require_chemistry_auxiliary_labels'] = True
+        validate_chemistry_schema(config)
+
     def test_joint_dataset_emits_joint_state_and_four_class_kekule_edge(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

@@ -42,6 +42,22 @@ def validate_chemistry_schema(config: dict) -> None:
             f'{dataset_bond_count} != {model_bond_count}'
         )
 
+    chemistry_config = model.get('chemistry_auxiliary', {})
+    chemistry_enabled = any(
+        float(value) > 0.0 for value in chemistry_config.values()
+    )
+    if chemistry_enabled:
+        if not dataset.get('require_chemistry_auxiliary_labels', False):
+            raise ValueError(
+                'enabled chemistry auxiliary losses require dataset '
+                'require_chemistry_auxiliary_labels=true'
+            )
+        if not dataset_joint or model_bond_count != 4:
+            raise ValueError(
+                'chemistry auxiliary losses require joint atom states and '
+                'four Kekule edge classes'
+            )
+
 
 def model_from_config(config: dict, seed_ckpt: Path = None) -> FlowMol:
     validate_chemistry_schema(config)

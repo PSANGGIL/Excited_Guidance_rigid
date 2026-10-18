@@ -23,6 +23,7 @@ from molguidance.data_processing.conditional_count import ConditionalAtomCountSa
 from einops import rearrange
 from .property_embeddings import PropertyEmbedder
 from .loss_utils import reduce_time_scaled_loss_equivalent
+from .chemistry_auxiliary import JointChemistryAuxiliaryLoss
 
 
 class FlowMol(pl.LightningModule):
@@ -63,6 +64,7 @@ class FlowMol(pl.LightningModule):
                  properties_handle_method: str = 'concatenate_sum', # choices ['concatenate', 'sum', 'multiply', 'concatenate_sum', 'concatenate_multiply']
                  validation_config: dict | None = None,
                  atom_count_conditioning: dict | None = None,
+                 chemistry_auxiliary: dict | None = None,
                  ):
         super().__init__()
 
@@ -109,6 +111,49 @@ class FlowMol(pl.LightningModule):
         self.properties_handle_method = properties_handle_method
         self.property_embedding_dim = property_embedding_dim
         self.dataset_name = dataset_name
+
+        chemistry_defaults = {
+            'edge_existence_weight': 0.0,
+            'valence_weight': 0.0,
+            'charge_weight': 0.0,
+            'connectivity_weight': 0.0,
+            'aromatic_weight': 0.0,
+        }
+        chemistry_config = dict(chemistry_auxiliary or {})
+        unknown_chemistry_keys = set(chemistry_config) - set(chemistry_defaults)
+        if unknown_chemistry_keys:
+            raise ValueError(
+                'unknown chemistry auxiliary options: '
+                + ', '.join(sorted(unknown_chemistry_keys))
+            )
+        chemistry_defaults.update(chemistry_config)
+        for key, value in chemistry_defaults.items():
+            value = float(value)
+            if not torch.isfinite(torch.tensor(value)) or value < 0.0:
+                raise ValueError(f'{key} must be finite and non-negative')
+            chemistry_defaults[key] = value
+        self.chemistry_auxiliary_config = chemistry_defaults
+        self.chemistry_loss_weights = {
+            'chem_edge_existence': chemistry_defaults['edge_existence_weight'],
+            'chem_valence': chemistry_defaults['valence_weight'],
+            'chem_charge': chemistry_defaults['charge_weight'],
+            'chem_connectivity': chemistry_defaults['connectivity_weight'],
+            'chem_aromatic': chemistry_defaults['aromatic_weight'],
+        }
+        self.chemistry_auxiliary_enabled = any(
+            value > 0.0 for value in self.chemistry_loss_weights.values()
+        )
+        self.chemistry_auxiliary_loss = None
+        if self.chemistry_auxiliary_enabled:
+            if not self.use_joint_atom_state:
+                raise ValueError(
+                    'chemistry auxiliary losses require joint atom states'
+                )
+            if parameterization != 'ctmc' or n_bond_types != 4:
+                raise ValueError(
+                    'chemistry auxiliary losses require CTMC Kekule edge states '
+                    'NONE/SINGLE/DOUBLE/TRIPLE'
+                )
 
         validation_defaults = {
             'time_grid': [0.05, 0.25, 0.5, 0.75, 0.95],
@@ -190,6 +235,7 @@ class FlowMol(pl.LightningModule):
             self.n_atoms_hist_file = repo_root / self.n_atoms_hist_file
 
         self.configure_joint_atom_state()
+        self.configure_chemistry_auxiliary()
 
         # do some boring stuff regarding the prior distribution
         self.configure_prior()
@@ -332,6 +378,65 @@ class FlowMol(pl.LightningModule):
         self.category_support_masks = {'s': [bool(value) for value in support]}
         self.joint_atom_state_metadata_file = str(metadata_path.resolve())
 
+    def configure_chemistry_auxiliary(self):
+        if not self.chemistry_auxiliary_enabled:
+            return
+        if self.atom_state_vocab is None:
+            raise RuntimeError("joint atom-state metadata was not configured")
+
+        support = torch.tensor(
+            self.category_support_masks["s"], dtype=torch.bool
+        )
+        charges = torch.tensor(
+            [state["formal_charge"] for state in self.atom_state_vocab],
+            dtype=torch.float32,
+        )
+        parsed_counts = []
+        max_valence = 0
+        for state_idx, state in enumerate(self.atom_state_vocab):
+            raw_counts = state.get("train_heavy_valence_counts")
+            if not isinstance(raw_counts, dict):
+                raise ValueError(
+                    "chemistry auxiliary losses require metadata version 2 "
+                    "with train_heavy_valence_counts"
+                )
+            counts = {}
+            for raw_valence, raw_count in raw_counts.items():
+                try:
+                    valence = int(raw_valence)
+                    count = int(raw_count)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"invalid valence count for atom state {state_idx}"
+                    ) from exc
+                if valence < 0 or count <= 0 or str(valence) != str(raw_valence):
+                    raise ValueError(
+                        f"invalid valence count for atom state {state_idx}"
+                    )
+                counts[valence] = count
+                max_valence = max(max_valence, valence)
+            if bool(support[state_idx]) and not counts:
+                raise ValueError(
+                    f"train-supported atom state {state_idx} has no valence support"
+                )
+            parsed_counts.append(counts)
+
+        valence_probabilities = torch.zeros(
+            (self.n_atom_states, max_valence + 1), dtype=torch.float32
+        )
+        for state_idx, counts in enumerate(parsed_counts):
+            for valence, count in counts.items():
+                valence_probabilities[state_idx, valence] = float(count)
+            row_sum = valence_probabilities[state_idx].sum()
+            if row_sum > 0:
+                valence_probabilities[state_idx] /= row_sum
+
+        self.chemistry_auxiliary_loss = JointChemistryAuxiliaryLoss(
+            state_charges=charges,
+            state_valence_probabilities=valence_probabilities,
+            state_support=support,
+        )
+
     def configure_prior(self):
         # load the marginal distributions of atom types, bond orders and the conditional distribution of charges given atom type
         p_a, p_c, p_e, p_c_given_a = torch.load(self.marginal_dists_file)
@@ -457,9 +562,7 @@ class FlowMol(pl.LightningModule):
         for key in losses:
             train_log_dict[f'{key}_train_loss'] = losses[key]
 
-        total_loss = torch.zeros(1, device=g.device, requires_grad=True)
-        for feat in self.canonical_feat_order:
-            total_loss = total_loss + self.total_loss_weights[feat]*losses[feat]
+        total_loss = self._total_from_feature_losses(losses)
 
         self.log_dict(train_log_dict, sync_dist=True)
         self.log('train_total_loss', total_loss, prog_bar=True, on_step=True, sync_dist=True)
@@ -477,7 +580,40 @@ class FlowMol(pl.LightningModule):
         total = torch.zeros((), device=next(iter(losses.values())).device)
         for feat in self.canonical_feat_order:
             total = total + self.total_loss_weights[feat] * losses[feat]
+        for loss_key, weight in self.chemistry_loss_weights.items():
+            if weight <= 0.0:
+                continue
+            if loss_key not in losses:
+                raise KeyError(f'enabled auxiliary loss {loss_key!r} is missing')
+            total = total + weight * losses[loss_key]
         return total
+
+    def compute_chemistry_auxiliary_losses(
+        self,
+        g: dgl.DGLGraph,
+        vf_output: Dict[str, torch.Tensor],
+        upper_edge_mask: torch.Tensor,
+        t: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.chemistry_auxiliary_enabled:
+            return {}
+        if self.chemistry_auxiliary_loss is None:
+            raise RuntimeError('chemistry auxiliary module is not configured')
+        graph_weights = vf_output['s'].new_ones(g.batch_size)
+        if self.time_scaled_loss:
+            time_weights = self.interpolant_scheduler.loss_weights(t)
+            state_idx = self.canonical_feat_order.index('s')
+            edge_idx = self.canonical_feat_order.index('e')
+            graph_weights = 0.5 * (
+                time_weights[:, state_idx] + time_weights[:, edge_idx]
+            ).to(vf_output['s'])
+        return self.chemistry_auxiliary_loss(
+            g,
+            node_logits=vf_output['s'],
+            edge_logits=vf_output['e'],
+            upper_edge_mask=upper_edge_mask,
+            graph_weights=graph_weights,
+        )
 
     def deterministic_validation_losses(self, g: dgl.DGLGraph, batch_idx: int):
         """Evaluate a fixed time/noise grid with conditioning always enabled."""
@@ -498,9 +634,12 @@ class FlowMol(pl.LightningModule):
                 )
             )
 
+        loss_keys = tuple(losses_by_time[0])
+        if any(tuple(losses) != loss_keys for losses in losses_by_time[1:]):
+            raise RuntimeError('validation loss keys changed across the time grid')
         mean_losses = {
-            feat: torch.stack([losses[feat] for losses in losses_by_time]).mean()
-            for feat in self.canonical_feat_order
+            key: torch.stack([losses[key] for losses in losses_by_time]).mean()
+            for key in loss_keys
         }
         diagnostics = {}
 
@@ -558,9 +697,7 @@ class FlowMol(pl.LightningModule):
         self.log_dict(val_log_dict, batch_size=g.batch_size, sync_dist=True)
 
         # combine individual losses into a total loss
-        total_loss = torch.zeros(1, device=g.device, requires_grad=False)
-        for feat in self.canonical_feat_order:
-            total_loss = total_loss + self.total_loss_weights[feat]*losses[feat]
+        total_loss = self._total_from_feature_losses(losses)
 
         self.log('val_total_loss', total_loss, prog_bar=True, batch_size=g.batch_size, on_step=True, sync_dist=True)
 
@@ -727,6 +864,11 @@ class FlowMol(pl.LightningModule):
                     losses[feat], weight
                 )
 
+        losses.update(
+            self.compute_chemistry_auxiliary_losses(
+                g, vf_output, upper_edge_mask, t
+            )
+        )
         return losses
     
     def sample_prior(self, g, node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor):
