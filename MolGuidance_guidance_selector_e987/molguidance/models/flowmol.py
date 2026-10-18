@@ -1,4 +1,5 @@
 from typing import Dict, List, Sequence
+import json
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -37,6 +38,8 @@ class FlowMol(pl.LightningModule):
                  n_atom_charges: int = 6,
                  n_bond_types: int = 5,
                  n_hydrogen_counts: int = 0,
+                 n_atom_states: int = 0,
+                 joint_atom_state_metadata_file: str | None = None,
                  sample_interval: float = 1.0, # how often to sample molecules from the model, measured in epochs
                  n_mols_to_sample: int = 64, # how many molecules to sample from the model during each sample/eval step during training
                  time_scaled_loss: bool = True,
@@ -77,6 +80,20 @@ class FlowMol(pl.LightningModule):
         self.n_hydrogen_counts = int(n_hydrogen_counts)
         if self.n_hydrogen_counts < 0:
             raise ValueError('n_hydrogen_counts must be non-negative')
+        self.n_atom_states = int(n_atom_states)
+        if self.n_atom_states < 0:
+            raise ValueError('n_atom_states must be non-negative')
+        self.use_joint_atom_state = self.n_atom_states > 0
+        if self.use_joint_atom_state and self.n_hydrogen_counts > 0:
+            raise ValueError(
+                'joint atom state contains charge and H count; '
+                'n_hydrogen_counts must be zero'
+            )
+        if self.use_joint_atom_state and exclude_charges:
+            raise ValueError('exclude_charges is not meaningful for joint atom states')
+        self.joint_atom_state_metadata_file = joint_atom_state_metadata_file
+        self.atom_state_vocab = None
+        self.category_support_masks = {}
         self.use_hydrogen_counts = self.n_hydrogen_counts > 0
         self.total_loss_weights = dict(total_loss_weights)
         self.time_scaled_loss = time_scaled_loss
@@ -124,7 +141,14 @@ class FlowMol(pl.LightningModule):
             )
         self.atom_count_conditioning = atom_count_defaults
 
-        if self.use_hydrogen_counts:
+        if self.use_joint_atom_state:
+            if parameterization != 'ctmc':
+                raise NotImplementedError(
+                    'joint atom state is currently supported only by CTMC'
+                )
+            self.canonical_feat_order = ['x', 's', 'e']
+            self.node_feats = ['x', 's']
+        elif self.use_hydrogen_counts:
             if parameterization != 'ctmc':
                 raise NotImplementedError(
                     'hydrogen-count state is currently supported only by the CTMC parameterization'
@@ -165,6 +189,8 @@ class FlowMol(pl.LightningModule):
             self.marginal_dists_file = repo_root / self.marginal_dists_file
             self.n_atoms_hist_file = repo_root / self.n_atoms_hist_file
 
+        self.configure_joint_atom_state()
+
         # do some boring stuff regarding the prior distribution
         self.configure_prior()
 
@@ -175,13 +201,16 @@ class FlowMol(pl.LightningModule):
             self.categorical_feats.remove('c')
 
         # create a dictionary mapping feature -> number of categories
-        self.n_cat_dict = {
-            'a': self.n_atom_types,
-            'c': n_atom_charges,
-            'e': n_bond_types,
-        }
-        if self.use_hydrogen_counts:
-            self.n_cat_dict['h'] = self.n_hydrogen_counts
+        if self.use_joint_atom_state:
+            self.n_cat_dict = {'s': self.n_atom_states, 'e': n_bond_types}
+        else:
+            self.n_cat_dict = {
+                'a': self.n_atom_types,
+                'c': n_atom_charges,
+                'e': n_bond_types,
+            }
+            if self.use_hydrogen_counts:
+                self.n_cat_dict['h'] = self.n_hydrogen_counts
 
         for feat in self.canonical_feat_order:
             if feat not in total_loss_weights:
@@ -217,6 +246,8 @@ class FlowMol(pl.LightningModule):
             self.vector_field = vector_field_class(n_atom_types=self.n_atom_types,
                                             canonical_feat_order=self.canonical_feat_order,
                                             interpolant_scheduler=self.interpolant_scheduler, 
+                                            n_atom_states=self.n_atom_states,
+                                            category_support_masks=self.category_support_masks,
                                             n_charges=n_atom_charges, 
                                             n_bond_types=n_bond_types,
                                             n_hydrogen_counts=self.n_hydrogen_counts,
@@ -231,6 +262,8 @@ class FlowMol(pl.LightningModule):
             self.vector_field = vector_field_class(n_atom_types=self.n_atom_types,
                                             canonical_feat_order=self.canonical_feat_order,
                                             interpolant_scheduler=self.interpolant_scheduler, 
+                                            n_atom_states=self.n_atom_states,
+                                            category_support_masks=self.category_support_masks,
                                             n_charges=n_atom_charges, 
                                             n_bond_types=n_bond_types,
                                             n_hydrogen_counts=self.n_hydrogen_counts,
@@ -253,24 +286,81 @@ class FlowMol(pl.LightningModule):
 
         self.save_hyperparameters()
 
+    def configure_joint_atom_state(self):
+        if not self.use_joint_atom_state:
+            return
+
+        metadata_path = self.joint_atom_state_metadata_file
+        if metadata_path is None:
+            metadata_path = Path(self.marginal_dists_file).parent / (
+                'joint_atom_state_metadata.json'
+            )
+        else:
+            metadata_path = Path(metadata_path)
+            if not metadata_path.is_absolute():
+                data_relative = Path(self.marginal_dists_file).parent / metadata_path
+                if data_relative.exists():
+                    metadata_path = data_relative
+                else:
+                    metadata_path = Path(__file__).parent.parent.parent / metadata_path
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f'joint atom-state metadata not found: {metadata_path}'
+            )
+
+        metadata = json.loads(metadata_path.read_text())
+        states = metadata.get('states')
+        support = metadata.get('train_supported')
+        if not isinstance(states, list) or len(states) != self.n_atom_states:
+            raise ValueError(
+                'joint atom-state vocabulary length does not match n_atom_states'
+            )
+        if not isinstance(support, list) or len(support) != self.n_atom_states:
+            raise ValueError(
+                'joint atom-state train_supported mask has invalid length'
+            )
+        required_keys = {'symbol', 'formal_charge', 'hydrogens'}
+        for idx, state in enumerate(states):
+            if not isinstance(state, dict) or not required_keys <= state.keys():
+                raise ValueError(f'invalid atom-state entry at index {idx}')
+            if state['symbol'] not in self.atom_type_map:
+                raise ValueError(
+                    f"atom-state symbol {state['symbol']!r} is absent from atom_type_map"
+                )
+
+        self.atom_state_vocab = states
+        self.category_support_masks = {'s': [bool(value) for value in support]}
+        self.joint_atom_state_metadata_file = str(metadata_path.resolve())
+
     def configure_prior(self):
         # load the marginal distributions of atom types, bond orders and the conditional distribution of charges given atom type
         p_a, p_c, p_e, p_c_given_a = torch.load(self.marginal_dists_file)
         self.p_a = p_a
         self.p_e = p_e
+        self.p_s = None
+        if self.use_joint_atom_state:
+            state_marginal_file = Path(self.marginal_dists_file).with_name(
+                'train_data_joint_state_marginal.pt'
+            )
+            self.p_s = torch.load(state_marginal_file)
+            if self.p_s.shape != (self.n_atom_states,):
+                raise ValueError('joint atom-state marginal has invalid shape')
 
         # add the marginal distributions as arguments to the prior sampling functions
-        if self.prior_config['a']['type'] == 'marginal':
+        if 'a' in self.prior_config and self.prior_config['a']['type'] == 'marginal':
             self.prior_config['a']['kwargs']['p'] = p_a
 
         if self.prior_config['e']['type'] == 'marginal':
             self.prior_config['e']['kwargs']['p'] = p_e
 
-        if self.prior_config['c']['type'] == 'marginal':
+        if 'c' in self.prior_config and self.prior_config['c']['type'] == 'marginal':
             self.prior_config['c']['kwargs']['p'] = p_c
         
-        if self.prior_config['c']['type'] == 'c-given-a':
+        if 'c' in self.prior_config and self.prior_config['c']['type'] == 'c-given-a':
             self.prior_config['c']['kwargs']['p_c_given_a'] = p_c_given_a
+
+        if 's' in self.prior_config and self.prior_config['s']['type'] == 'marginal':
+            self.prior_config['s']['kwargs']['p'] = self.p_s
 
         if self.parameterization == 'dirichlet':
             for feat in self.categorical_feats:
@@ -296,10 +386,14 @@ class FlowMol(pl.LightningModule):
 
 
         if self.weight_ae:
-            a_kwargs = {'weight': (1 - self.p_a).to(device)}
+            node_kwargs = {
+                'weight': (
+                    1 - (self.p_s if self.use_joint_atom_state else self.p_a)
+                ).to(device)
+            }
             e_kwargs = {'weight': (1 - self.p_e).to(device)}
         else:
-            a_kwargs = {}
+            node_kwargs = {}
             e_kwargs = {}
 
         if self.parameterization == 'ctmc':
@@ -307,16 +401,25 @@ class FlowMol(pl.LightningModule):
         else:
             cat_kwargs = {}
 
-        self.loss_fn_dict = {
-            'x': nn.MSELoss(reduction=reduction),
-            'a': categorical_loss_fn(reduction=reduction, **a_kwargs, **cat_kwargs),
-            'c': categorical_loss_fn(reduction=reduction, **cat_kwargs),
-            'e': categorical_loss_fn(reduction=reduction, **e_kwargs, **cat_kwargs),
-        }
-        if self.use_hydrogen_counts:
-            self.loss_fn_dict['h'] = categorical_loss_fn(
+        self.loss_fn_dict = {'x': nn.MSELoss(reduction=reduction)}
+        if self.use_joint_atom_state:
+            self.loss_fn_dict['s'] = categorical_loss_fn(
+                reduction=reduction, **node_kwargs, **cat_kwargs
+            )
+        else:
+            self.loss_fn_dict['a'] = categorical_loss_fn(
+                reduction=reduction, **node_kwargs, **cat_kwargs
+            )
+            self.loss_fn_dict['c'] = categorical_loss_fn(
                 reduction=reduction, **cat_kwargs
             )
+            if self.use_hydrogen_counts:
+                self.loss_fn_dict['h'] = categorical_loss_fn(
+                    reduction=reduction, **cat_kwargs
+                )
+        self.loss_fn_dict['e'] = categorical_loss_fn(
+            reduction=reduction, **e_kwargs, **cat_kwargs
+        )
 
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
 
@@ -586,6 +689,13 @@ class FlowMol(pl.LightningModule):
                 # note that we use the default ignore_index of the CrossEntropyLoss class here
                 target[ xt_idxs != self.n_cat_dict[feat] ] = -100 # set the target to ignore_index when the feature is already unmasked in xt
 
+                support = self.vector_field.get_category_support_mask(feat)
+                if support is not None and target.ndim == 1:
+                    unsupported_target = ~support[target.clamp_min(0)]
+                    # Held-out-only lossless states remain decodable but are
+                    # outside the train-supported generative vocabulary.
+                    target[unsupported_target & (target != -100)] = -100
+
             targets[feat] = target
 
         # get the time-dependent loss weights if necessary
@@ -646,7 +756,11 @@ class FlowMol(pl.LightningModule):
             g.ndata[f'{feat}_0'] = prior_fn(*args, **kwargs).to(device)
 
         # sample the prior for edge features
-        g.edata['e_0'] = edge_prior(upper_edge_mask, self.prior_config['e']).to(device)
+        g.edata['e_0'] = edge_prior(
+            upper_edge_mask,
+            self.prior_config['e'],
+            self.n_bond_types,
+        ).to(device)
             
         return g
 
@@ -945,6 +1059,7 @@ class FlowMol(pl.LightningModule):
                 ctmc_mol=ctmc_mol, 
                 build_xt_traj=xt_traj,
                 build_ep_traj=ep_traj,
+                atom_state_vocab=self.atom_state_vocab,
                 exclude_charges=self.exclude_charges))
 
         return molecules

@@ -17,6 +17,8 @@ class EndpointVectorField(nn.Module):
                     n_charges: int = 6,
                     n_bond_types: int = 5,
                     n_hydrogen_counts: int = 0,
+                    n_atom_states: int = 0,
+                    category_support_masks: dict | None = None,
                     n_vec_channels: int = 16,
                     n_cp_feats: int = 0, 
                     n_hidden_scalars: int = 64,
@@ -46,6 +48,15 @@ class EndpointVectorField(nn.Module):
         self.n_charges = n_charges
         self.n_bond_types = n_bond_types
         self.n_hydrogen_counts = int(n_hydrogen_counts)
+        self.n_atom_states = int(n_atom_states)
+        if self.n_atom_states < 0:
+            raise ValueError('n_atom_states must be non-negative')
+        self.use_joint_atom_state = self.n_atom_states > 0
+        if self.use_joint_atom_state and self.n_hydrogen_counts > 0:
+            raise ValueError(
+                'joint atom state already contains charge and H count; '
+                'n_hydrogen_counts must be zero'
+            )
         self.n_hidden_scalars = n_hidden_scalars
         self.n_hidden_edge_feats = n_hidden_edge_feats
         self.n_vec_channels = n_vec_channels
@@ -71,26 +82,53 @@ class EndpointVectorField(nn.Module):
         self.continouts_inv_temp_max = continuous_inv_temp_max
         self.continuous_inv_temp_func = self.build_continuous_inv_temp_func(self.continuous_inv_temp_schedule, self.continouts_inv_temp_max) 
 
-        self.n_cat_feats = { # number of possible values for each categorical variable (not including mask tokens in the case of CTMC)
-            'a': self.n_atom_types,
-            'c': self.n_charges,
-            'e': self.n_bond_types,
-        }
-        if self.n_hydrogen_counts > 0:
-            self.n_cat_feats['h'] = self.n_hydrogen_counts
+        if self.use_joint_atom_state:
+            self.node_categorical_feats = ['s']
+            self.n_cat_feats = {
+                's': self.n_atom_states,
+                'e': self.n_bond_types,
+            }
+        else:
+            self.node_categorical_feats = ['a']
+            self.n_cat_feats = {
+                'a': self.n_atom_types,
+                'c': self.n_charges,
+                'e': self.n_bond_types,
+            }
+            if not self.exclude_charges:
+                self.node_categorical_feats.append('c')
+            if self.n_hydrogen_counts > 0:
+                self.node_categorical_feats.append('h')
+                self.n_cat_feats['h'] = self.n_hydrogen_counts
+
+        category_support_masks = category_support_masks or {}
+        self._category_support_buffer_names = {}
+        for feat, support in category_support_masks.items():
+            if feat not in self.n_cat_feats or feat == 'e':
+                raise ValueError(f'unsupported category-support feature: {feat}')
+            support_tensor = torch.as_tensor(support, dtype=torch.bool)
+            expected = self.n_cat_feats[feat]
+            if support_tensor.shape != (expected,):
+                raise ValueError(
+                    f'{feat} support mask must have shape ({expected},), '
+                    f'got {tuple(support_tensor.shape)}'
+                )
+            if not bool(support_tensor.any()):
+                raise ValueError(f'{feat} support mask cannot exclude every class')
+            buffer_name = f'_category_support_{feat}'
+            self.register_buffer(buffer_name, support_tensor, persistent=False)
+            self._category_support_buffer_names[feat] = buffer_name
 
         n_mask_feats = int(has_mask)
         self.n_mask_feats = n_mask_feats
 
-        n_node_categorical_features = 1 + int(not self.exclude_charges)
-        if self.n_hydrogen_counts > 0:
-            n_node_categorical_features += 1
+        node_category_dim = sum(
+            self.n_cat_feats[feat] for feat in self.node_categorical_feats
+        )
         node_input_dim = (
-            self.n_atom_types
-            + self.n_charges
-            + self.n_hydrogen_counts
+            node_category_dim
             + 1
-            + n_node_categorical_features * n_mask_feats
+            + len(self.node_categorical_feats) * n_mask_feats
         )
         self.node_input_dim = node_input_dim
         self.scalar_embedding = nn.Sequential(
@@ -142,7 +180,7 @@ class EndpointVectorField(nn.Module):
             nn.SiLU(),
             nn.Linear(
                 n_hidden_scalars,
-                self.n_atom_types + self.n_charges + self.n_hydrogen_counts,
+                node_category_dim,
             )
         )
 
@@ -151,6 +189,60 @@ class EndpointVectorField(nn.Module):
             nn.SiLU(),
             nn.Linear(n_hidden_edge_feats, n_bond_types)
         )
+
+    def build_node_scalar_inputs(
+        self,
+        g: dgl.DGLGraph,
+        time_tensor: torch.Tensor,
+        node_batch_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        """Concatenate noisy node states and time in one canonical order."""
+        features = [g.ndata[f'{self.node_categorical_feats[0]}_t']]
+        features.append(time_tensor[node_batch_idx].unsqueeze(-1))
+        features.extend(
+            g.ndata[f'{feat}_t'] for feat in self.node_categorical_feats[1:]
+        )
+        return torch.cat(features, dim=-1)
+
+    def split_node_output(
+        self,
+        output: torch.Tensor,
+        enforce_support: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """Split the shared node head using the same feature specification."""
+        result = {}
+        offset = 0
+        for feat in self.node_categorical_feats:
+            width = self.n_cat_feats[feat]
+            logits = output[:, offset:offset + width]
+            result[feat] = (
+                self.apply_category_support(logits, feat)
+                if enforce_support else logits
+            )
+            offset += width
+        if offset != output.shape[-1]:
+            raise RuntimeError(
+                f'node output width mismatch: consumed {offset}, got {output.shape[-1]}'
+            )
+        return result
+
+    def get_category_support_mask(self, feat: str) -> torch.Tensor | None:
+        """Return the train-supported endpoint classes for a feature."""
+        buffer_name = self._category_support_buffer_names.get(feat)
+        if buffer_name is None:
+            return None
+        return getattr(self, buffer_name)
+
+    def apply_category_support(
+        self, logits: torch.Tensor, feat: str
+    ) -> torch.Tensor:
+        """Prevent held-out-only codec states from being generated."""
+        support = self.get_category_support_mask(feat)
+        if support is None:
+            return logits
+        # A finite sentinel avoids the undefined 0 * (-inf) term in CFG at
+        # guide_weight=1 while still underflowing to zero after softmax.
+        return logits.masked_fill(~support.unsqueeze(0), -1.0e4)
 
     def build_continuous_inv_temp_func(self, schedule, max_inv_temp=None):
 
@@ -172,18 +264,9 @@ class EndpointVectorField(nn.Module):
 
         with g.local_scope():
             # gather node and edge features for input to convolutions
-            node_scalar_features = [
-                g.ndata['a_t'],
-                t[node_batch_idx].unsqueeze(-1)
-            ]
-
-            # if we are not excluding charges, include them in the node scalar features
-            if not self.exclude_charges:
-                node_scalar_features.append(g.ndata['c_t'])
-            if self.n_hydrogen_counts > 0:
-                node_scalar_features.append(g.ndata['h_t'])
-
-            node_scalar_features = torch.cat(node_scalar_features, dim=-1)
+            node_scalar_features = self.build_node_scalar_inputs(
+                g, t, node_batch_idx
+            )
             node_scalar_features = self.scalar_embedding(node_scalar_features)
 
             node_positions = g.ndata['x_t']
@@ -228,19 +311,11 @@ class EndpointVectorField(nn.Module):
                         edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
 
             
-            # predict final charges and atom type logits
-            node_scalar_features = self.node_output_head(node_scalar_features)
-            atom_type_logits = node_scalar_features[:, :self.n_atom_types]
-            output_offset = self.n_atom_types
-            if not self.exclude_charges:
-                atom_charge_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_charges
-                ]
-                output_offset += self.n_charges
-            if self.n_hydrogen_counts > 0:
-                atom_hydrogen_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_hydrogen_counts
-                ]
+            # predict final categorical node states
+            node_logits = self.split_node_output(
+                self.node_output_head(node_scalar_features),
+                enforce_support=apply_softmax,
+            )
 
             # predict the final edge logits
             ue_feats = edge_features[upper_edge_mask]
@@ -254,15 +329,7 @@ class EndpointVectorField(nn.Module):
                 node_positions = g.ndata['x_1_pred']
 
         # build a dictionary of predicted features
-        dst_dict = {
-            'x': node_positions,
-            'a': atom_type_logits,
-            'e': edge_logits
-        }
-        if not self.exclude_charges:
-            dst_dict['c'] = atom_charge_logits
-        if self.n_hydrogen_counts > 0:
-            dst_dict['h'] = atom_hydrogen_logits
+        dst_dict = {'x': node_positions, **node_logits, 'e': edge_logits}
 
         # apply softmax to categorical features, if requested
         # at training time, we don't want to apply softmax because we use cross-entropy loss which includes softmax

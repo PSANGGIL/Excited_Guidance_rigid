@@ -76,6 +76,8 @@ class ModelGuidance(FlowMol):
                 n_atom_types=self.n_atom_types,
                 canonical_feat_order=self.canonical_feat_order,
                 interpolant_scheduler=self.interpolant_scheduler, 
+                n_atom_states=self.n_atom_states,
+                category_support_masks=self.category_support_masks,
                 n_charges=self.n_atom_charges, 
                 n_bond_types=self.n_bond_types,
                 n_hydrogen_counts=self.n_hydrogen_counts,
@@ -311,6 +313,13 @@ class ModelGuidance(FlowMol):
                     xt_idxs = data_src[f'{feat}_t'].argmax(-1)
                 target[xt_idxs != self.n_cat_dict[feat]] = -100
 
+                support = self.vector_field.get_category_support_mask(feat)
+                if support is not None and target.ndim == 1:
+                    unsupported_target = ~support[target.clamp_min(0)]
+                    # Keep validation on the train-supported vocabulary.
+                    target[unsupported_target & (target != -100)] = -100
+
+
 
             if feat == 'x' and use_mg_loss:
                 with torch.no_grad():
@@ -463,7 +472,8 @@ class ModelGuidance(FlowMol):
                 ctmc_mol=ctmc_mol,
                 build_xt_traj=xt_traj,
                 build_ep_traj=ep_traj,
-                exclude_charges=self.exclude_charges))
+                exclude_charges=self.exclude_charges,
+                atom_state_vocab=self.atom_state_vocab))
 
         return molecules
 
@@ -573,15 +583,9 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             
             scale_emb = scale_embedding[node_batch_idx]
             
-            base_features = [
-                g.ndata['a_t'],
-                time_tensor[node_batch_idx].unsqueeze(-1)
-            ]
-            if not self.exclude_charges:
-                base_features.append(g.ndata['c_t'])
-            if self.n_hydrogen_counts > 0:
-                base_features.append(g.ndata['h_t'])
-            base_features = torch.cat(base_features, dim=-1)
+            base_features = self.build_node_scalar_inputs(
+                g, time_tensor, node_batch_idx
+            )
             node_scalar_features = self.scalar_embedding_uncond(base_features)
 
             try:
@@ -701,19 +705,12 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                         edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
 
             
-            # predict final charges and atom type logits
-            node_scalar_features = self.node_output_head(node_scalar_features)
-            atom_type_logits = node_scalar_features[:, :self.n_atom_types]
-            output_offset = self.n_atom_types
-            if not self.exclude_charges:
-                atom_charge_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_charges
-                ]
-                output_offset += self.n_charges
-            if self.n_hydrogen_counts > 0:
-                atom_hydrogen_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_hydrogen_counts
-                ]
+            # Use the base field's dynamic chemistry contract: either legacy
+            # a/c/h heads or the joint atom-state head s.
+            node_logits = self.split_node_output(
+                self.node_output_head(node_scalar_features),
+                enforce_support=apply_softmax,
+            )
 
             # predict the final edge logits
             ue_feats = edge_features[upper_edge_mask]
@@ -727,15 +724,7 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                 node_positions = g.ndata['x_1_pred']
 
         # build a dictionary of predicted features
-        dst_dict = {
-            'x': node_positions,
-            'a': atom_type_logits,
-            'e': edge_logits
-        }
-        if not self.exclude_charges:
-            dst_dict['c'] = atom_charge_logits
-        if self.n_hydrogen_counts > 0:
-            dst_dict['h'] = atom_hydrogen_logits
+        dst_dict = {'x': node_positions, **node_logits, 'e': edge_logits}
 
         # apply softmax to categorical features, if requested
         if apply_softmax:

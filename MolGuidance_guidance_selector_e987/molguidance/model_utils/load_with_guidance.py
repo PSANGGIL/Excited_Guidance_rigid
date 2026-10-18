@@ -1,5 +1,6 @@
 from molguidance.models.classifier_free_guidance import ClassifierFreeGuidance
 from molguidance.models.model_guidance_scale import ModelGuidance
+from molguidance.model_utils.load import validate_chemistry_schema
 from pathlib import Path
 
 
@@ -13,6 +14,7 @@ def model_from_config_with_guidance(config: dict, seed_ckpt: Path = None):
     Returns:
         A configured model instance
     """
+    validate_chemistry_schema(config)
     # QM9 dataset Gaussian expansion parameters
     Gaussian_expansion_start_dict = {
         'mu': 0.0, 'alpha': 6.31, 'homo': -0.4286, 'lumo': -0.175, 

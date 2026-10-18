@@ -29,6 +29,23 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.target_property = self.conditioning.get('property', None)
         self.normalize_property = self.conditioning.get('normalize', True)
         self.use_hydrogen_counts = bool(dataset_config.get('use_hydrogen_counts', False))
+        self.use_joint_atom_state = bool(
+            dataset_config.get('use_joint_atom_state', False)
+        )
+        self.n_atom_states = int(dataset_config.get('n_atom_states', 0))
+        self.n_bond_types = int(dataset_config.get('n_bond_types', 5))
+        if self.use_joint_atom_state and self.n_atom_states <= 0:
+            raise ValueError(
+                'n_atom_states must be positive when joint atom state is enabled'
+            )
+        if self.use_joint_atom_state and self.use_hydrogen_counts:
+            raise ValueError(
+                'joint atom state already contains H count; disable separate H state'
+            )
+        if self.n_bond_types <= 1:
+            raise ValueError(
+                'n_bond_types must include NONE and at least one bond'
+            )
         self.n_hydrogen_counts = int(dataset_config.get('n_hydrogen_counts', 0))
         if self.use_hydrogen_counts and self.n_hydrogen_counts <= 0:
             raise ValueError('n_hydrogen_counts must be positive when use_hydrogen_counts is enabled')
@@ -51,17 +68,23 @@ class MoleculeDataset(torch.utils.data.Dataset):
         p_a, p_c, p_e, p_c_given_a = torch.load(marginal_dists_file)
 
         # add the marginal distributions as arguments to the prior sampling functions
-        if self.prior_config['a']['type'] == 'marginal':
+        if 'a' in self.prior_config and self.prior_config['a']['type'] == 'marginal':
             self.prior_config['a']['kwargs']['p'] = p_a
 
         if self.prior_config['e']['type'] == 'marginal':
             self.prior_config['e']['kwargs']['p'] = p_e
 
-        if self.prior_config['c']['type'] == 'marginal':
+        if 'c' in self.prior_config and self.prior_config['c']['type'] == 'marginal':
             self.prior_config['c']['kwargs']['p'] = p_c
         
-        if self.prior_config['c']['type'] == 'c-given-a':
+        if 'c' in self.prior_config and self.prior_config['c']['type'] == 'c-given-a':
             self.prior_config['c']['kwargs']['p_c_given_a'] = p_c_given_a
+
+        if 's' in self.prior_config and self.prior_config['s']['type'] == 'marginal':
+            p_s = torch.load(
+                processed_data_dir / 'train_data_joint_state_marginal.pt'
+            )
+            self.prior_config['s']['kwargs']['p'] = p_s
 
         if dataset_config['dataset_name'] in ['geom', 'qm9', 'qme14s']:
             data_file = processed_data_dir / f'{split}_data_processed.pt'
@@ -74,6 +97,21 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.positions = data_dict['positions']
         self.atom_types = data_dict['atom_types']
         self.atom_charges = data_dict['atom_charges']
+        if self.use_joint_atom_state:
+            if 'atom_states' not in data_dict:
+                raise ValueError(
+                    f'Joint atom state requested, but {data_file} has no atom_states tensor'
+                )
+            self.atom_states = data_dict['atom_states'].long()
+            if self.atom_states.shape[0] != self.atom_types.shape[0]:
+                raise ValueError('atom_states and atom_types have different lengths')
+            if self.atom_states.numel() and (
+                self.atom_states.min() < 0
+                or self.atom_states.max() >= self.n_atom_states
+            ):
+                raise ValueError(
+                    'atom_states contains a class outside n_atom_states'
+                )
         if self.use_hydrogen_counts:
             if 'atom_hydrogens' not in data_dict:
                 raise ValueError(
@@ -124,6 +162,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
         positions = self.positions[node_start_idx:node_end_idx]
         atom_types = self.atom_types[node_start_idx:node_end_idx].float()
         atom_charges = self.atom_charges[node_start_idx:node_end_idx].long()
+        if self.use_joint_atom_state:
+            atom_states = self.atom_states[node_start_idx:node_end_idx]
         if self.use_hydrogen_counts:
             atom_hydrogens = self.atom_hydrogens[node_start_idx:node_end_idx]
 
@@ -152,13 +192,16 @@ class MoleculeDataset(torch.utils.data.Dataset):
         edge_labels = torch.cat((upper_edge_labels, upper_edge_labels))
 
         # one-hot encode edge labels and atom charges
-        edge_labels = one_hot(edge_labels.to(torch.int64), num_classes=5).float() # hard-coded assumption of 5 bond types
-        try:
-            atom_charges = one_hot(atom_charges + 2, num_classes=6).float() # hard-coded assumption that charges are in range [-2, 3]
-        except Exception as e:
-            print('an atom charge outside of the expected range was encountered')
-            print(f'max atom charge: {atom_charges.max()}, min atom charge: {atom_charges.min()}')
-            raise e
+        edge_labels = one_hot(
+            edge_labels.to(torch.int64), num_classes=self.n_bond_types
+        ).float()
+        if not self.use_joint_atom_state:
+            try:
+                atom_charges = one_hot(atom_charges + 2, num_classes=6).float() # hard-coded legacy assumption that charges are in range [-2, 3]
+            except Exception as e:
+                print('an atom charge outside of the expected range was encountered')
+                print(f'max atom charge: {atom_charges.max()}, min atom charge: {atom_charges.min()}')
+                raise e
 
         # create a dgl graph
         g = dgl.graph((edges[0], edges[1]), num_nodes=n_atoms)
@@ -168,9 +211,14 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         # add node features
         g.ndata['x_1_true'] = positions
-        g.ndata['a_1_true'] = atom_types
-        g.ndata['c_1_true'] = atom_charges
-        if self.use_hydrogen_counts:
+        if self.use_joint_atom_state:
+            g.ndata['s_1_true'] = one_hot(
+                atom_states, num_classes=self.n_atom_states
+            ).float()
+        else:
+            g.ndata['a_1_true'] = atom_types
+            g.ndata['c_1_true'] = atom_charges
+        if self.use_hydrogen_counts and not self.use_joint_atom_state:
             g.ndata['h_1_true'] = one_hot(
                 atom_hydrogens, num_classes=self.n_hydrogen_counts
             ).float()
@@ -194,13 +242,16 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
 
         # sample prior for node features, coupled to the destination features
-        dst_dict = {
-            'x': positions,
-            'a': atom_types,
-            'c': atom_charges
-        }
-        if self.use_hydrogen_counts:
-            dst_dict['h'] = g.ndata['h_1_true']
+        if self.use_joint_atom_state:
+            dst_dict = {'x': positions, 's': g.ndata['s_1_true']}
+        else:
+            dst_dict = {
+                'x': positions,
+                'a': atom_types,
+                'c': atom_charges
+            }
+            if self.use_hydrogen_counts:
+                dst_dict['h'] = g.ndata['h_1_true']
         prior_node_feats = coupled_node_prior(dst_dict=dst_dict, prior_config=self.prior_config)
         for feat in prior_node_feats:
             g.ndata[f'{feat}_0'] = prior_node_feats[feat]
@@ -209,6 +260,10 @@ class MoleculeDataset(torch.utils.data.Dataset):
         upper_edge_mask = torch.zeros(g.num_edges(), dtype=torch.bool)
         n_upper_edges = upper_edge_idxs.shape[1]
         upper_edge_mask[:n_upper_edges] = True
-        g.edata['e_0'] = edge_prior(upper_edge_mask, self.prior_config['e'])
+        g.edata['e_0'] = edge_prior(
+            upper_edge_mask,
+            self.prior_config['e'],
+            self.n_bond_types,
+        )
 
         return g

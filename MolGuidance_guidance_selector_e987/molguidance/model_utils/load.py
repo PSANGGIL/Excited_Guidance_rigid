@@ -9,7 +9,42 @@ def read_config_file(config_file: Path) -> dict:
         config = yaml.load(f, Loader=yaml.FullLoader)
     return config
 
+def validate_chemistry_schema(config: dict) -> None:
+    """Fail before training when dataset/model categorical widths disagree."""
+    dataset = config['dataset']
+    model = config['mol_fm']
+    dataset_joint = bool(dataset.get('use_joint_atom_state', False))
+    model_state_count = int(model.get('n_atom_states', 0))
+    model_joint = model_state_count > 0
+    if dataset_joint != model_joint:
+        raise ValueError(
+            'dataset.use_joint_atom_state and mol_fm.n_atom_states disagree'
+        )
+    if dataset_joint:
+        dataset_state_count = int(dataset.get('n_atom_states', 0))
+        if dataset_state_count != model_state_count:
+            raise ValueError(
+                'dataset.n_atom_states and mol_fm.n_atom_states disagree: '
+                f'{dataset_state_count} != {model_state_count}'
+            )
+        if bool(dataset.get('use_hydrogen_counts', False)) or int(
+            model.get('n_hydrogen_counts', 0)
+        ) != 0:
+            raise ValueError(
+                'joint atom state cannot be combined with a separate H state'
+            )
+
+    dataset_bond_count = int(dataset.get('n_bond_types', 5))
+    model_bond_count = int(model.get('n_bond_types', 5))
+    if dataset_bond_count != model_bond_count:
+        raise ValueError(
+            'dataset.n_bond_types and mol_fm.n_bond_types disagree: '
+            f'{dataset_bond_count} != {model_bond_count}'
+        )
+
+
 def model_from_config(config: dict, seed_ckpt: Path = None) -> FlowMol:
+    validate_chemistry_schema(config)
     # for qm9 dataset: find min and max values for Gaussian expansion
     Gaussian_expansion_start_dict = {
         'mu': 0.0, 'alpha': 6.31, 'homo': -0.4286, 'lumo': -0.175, 'gap': 0.0246, 'cv': 6.002,

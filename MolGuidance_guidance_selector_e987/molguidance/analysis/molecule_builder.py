@@ -24,6 +24,7 @@ class SampledMolecule:
         exclude_charges: bool = False, 
         align_traj: bool = True,
         build_xt_traj=True,
+        atom_state_vocab: List[dict] | None = None,
         build_ep_traj=True,):
         """Represents a molecule sampled from a model. Converts the DGL graph to an rdkit molecule and keeps all associated information."""
 
@@ -32,6 +33,7 @@ class SampledMolecule:
         self.exclude_charges = exclude_charges
         self.align_traj = align_traj
         self.ctmc_mol = ctmc_mol
+        self.atom_state_vocab = atom_state_vocab
         if residual_mask_policy not in {"reject", "allow"}:
             raise ValueError("residual_mask_policy must be 'reject' or 'allow'")
         self.residual_mask_policy = residual_mask_policy
@@ -46,9 +48,11 @@ class SampledMolecule:
             g,
             atom_type_map,
             exclude_charges=exclude_charges,
-            ctmc_mol=self.ctmc_mol)
+            ctmc_mol=self.ctmc_mol,
+            atom_state_vocab=self.atom_state_vocab)
         self.atom_hydrogens = extract_hydrogen_counts_from_graph(
-            g, ctmc_mol=self.ctmc_mol
+            g, ctmc_mol=self.ctmc_mol,
+            atom_state_vocab=self.atom_state_vocab,
         )
 
         self.atom_type_map = atom_type_map
@@ -183,10 +187,12 @@ class SampledMolecule:
             positions, atom_types, atom_charges, bond_types, bond_src_idxs, bond_dst_idxs = extract_moldata_from_graph(
                 g_dummy, 
                 self.atom_type_map,
-                ctmc_mol=self.ctmc_mol)
+                ctmc_mol=self.ctmc_mol,
+                atom_state_vocab=self.atom_state_vocab)
 
             atom_hydrogens = extract_hydrogen_counts_from_graph(
-                g_dummy, ctmc_mol=self.ctmc_mol
+                g_dummy, ctmc_mol=self.ctmc_mol,
+                atom_state_vocab=self.atom_state_vocab,
             )
 
             # align positions to final frame
@@ -215,25 +221,46 @@ class SampledMolecule:
         return traj_mols
     
 
-def extract_moldata_from_graph(g: dgl.DGLGraph, atom_type_map: List[str], exclude_charges: bool = False, ctmc_mol: bool = False):
+def extract_moldata_from_graph(
+    g: dgl.DGLGraph,
+    atom_type_map: List[str],
+    exclude_charges: bool = False,
+    ctmc_mol: bool = False,
+    atom_state_vocab: List[dict] | None = None,
+):
 
     # extract node-level features
     positions = g.ndata['x_1']
 
-    # extract node-level features
-    positions = g.ndata['x_1']
-    atom_types = g.ndata['a_1'].argmax(dim=1)
-    atom_types = [atom_type_map[int(atom)] for atom in atom_types]
-
-    if exclude_charges:
-        atom_charges = None
+    if 's_1' in g.ndata:
+        if atom_state_vocab is None:
+            raise ValueError('s_1 is present but atom_state_vocab was not provided')
+        state_indices = g.ndata['s_1'].argmax(dim=1).tolist()
+        atom_types = []
+        atom_charges = []
+        for state_idx in state_indices:
+            if state_idx >= len(atom_state_vocab):
+                atom_types.append('__MASK_ATOM__')
+                atom_charges.append(0)
+            else:
+                state = atom_state_vocab[state_idx]
+                atom_types.append(state['symbol'])
+                atom_charges.append(int(state['formal_charge']))
+        atom_charges = torch.tensor(atom_charges, dtype=torch.long)
     else:
-        atom_charges = g.ndata['c_1'].argmax(dim=1) - 2 # implicit assumption that index 0 charge is -2
+        atom_types = g.ndata['a_1'].argmax(dim=1)
+        atom_types = [atom_type_map[int(atom)] for atom in atom_types]
+        if exclude_charges:
+            atom_charges = None
+        else:
+            atom_charges = g.ndata['c_1'].argmax(dim=1) - 2
 
 
     # get bond types and atom indicies for every edge, convert types from simplex to integer
     bond_types = g.edata['e_1'].argmax(dim=1)
-    bond_types[bond_types == 5] = 0 # set masked bonds to 0
+    if ctmc_mol:
+        mask_index = g.edata['e_1'].shape[-1] - 1
+        bond_types[bond_types == mask_index] = 0
     bond_src_idxs, bond_dst_idxs = g.edges()
 
     # get just the upper triangle of the adjacency matrix
@@ -253,8 +280,25 @@ def extract_moldata_from_graph(g: dgl.DGLGraph, atom_type_map: List[str], exclud
 
 
 
-def extract_hydrogen_counts_from_graph(g: dgl.DGLGraph, ctmc_mol: bool = False):
+def extract_hydrogen_counts_from_graph(
+    g: dgl.DGLGraph,
+    ctmc_mol: bool = False,
+    atom_state_vocab: List[dict] | None = None,
+):
     # A residual CTMC mask is represented as -1 and rejected by build_molecule.
+    if 's_1' in g.ndata:
+        if atom_state_vocab is None:
+            raise ValueError('s_1 is present but atom_state_vocab was not provided')
+        state_indices = g.ndata['s_1'].argmax(dim=1).tolist()
+        return torch.tensor(
+            [
+                -1
+                if state_idx >= len(atom_state_vocab)
+                else int(atom_state_vocab[state_idx]['hydrogens'])
+                for state_idx in state_indices
+            ],
+            dtype=torch.long,
+        )
     if 'h_1' not in g.ndata:
         return None
     hydrogen_state = g.ndata['h_1']
@@ -336,10 +380,15 @@ def copy_graph(g: dgl.DGLGraph) -> dgl.DGLGraph:
 
     return g_copy
 
-def dataset_mol_to_sampled_mol(g, atom_type_map) -> SampledMolecule:
-    features = ['x', 'a', 'c', 'e']
-    if 'h_1_true' in g.ndata:
-        features.insert(-1, 'h')
+def dataset_mol_to_sampled_mol(
+    g, atom_type_map, atom_state_vocab=None
+) -> SampledMolecule:
+    if 's_1_true' in g.ndata:
+        features = ['x', 's', 'e']
+    else:
+        features = ['x', 'a', 'c', 'e']
+        if 'h_1_true' in g.ndata:
+            features.insert(-1, 'h')
     for feat in features:
         if feat == 'e':
             data_src = g.edata
@@ -348,7 +397,11 @@ def dataset_mol_to_sampled_mol(g, atom_type_map) -> SampledMolecule:
         data_src[f'{feat}_1'] = data_src[f'{feat}_1_true']
 
     g.edata['ue_mask'] = get_upper_edge_mask(g)
-    return SampledMolecule(g, atom_type_map)
+    return SampledMolecule(
+        g, atom_type_map, atom_state_vocab=atom_state_vocab
+    )
 
-def dataset_mol_to_rdmol(g, atom_type_map):
-    dataset_mol_to_sampled_mol(g, atom_type_map).rdkit_mol
+def dataset_mol_to_rdmol(g, atom_type_map, atom_state_vocab=None):
+    return dataset_mol_to_sampled_mol(
+        g, atom_type_map, atom_state_vocab=atom_state_vocab
+    ).rdkit_mol

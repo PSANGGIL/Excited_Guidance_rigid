@@ -33,6 +33,7 @@ def sample_molecules_with_guidance(model,
         guide_w = {}
         guide_w['x'] = guide_w1
         guide_w['a'] = guide_w2
+        guide_w['s'] = guide_w2
         guide_w['c'] = guide_w2
         guide_w['e'] = guide_w2
     elif model.__class__.__name__ == 'ModelGuidance':
@@ -101,7 +102,7 @@ def sample_molecules_with_auto_guidance(good_model,
     if guide_w is None:
         guide_w = 2.0
     if isinstance(guide_w, (int, float)):
-        guide_w = {feat: guide_w for feat in ['x', 'a', 'c', 'e']}
+        guide_w = {feat: guide_w for feat in ['x', 'a', 'c', 's', 'e']}
     
     if not fixed_property_val:
         property_value = multiple_values_to_one_property[0]
@@ -181,6 +182,13 @@ def _handle_categorical_feature(feat, good_model, bad_model, good_pred, bad_pred
     log_p_good = torch.log(good_pred[feat] + 1e-10)
     p_s_1 = torch.exp(log_p_bad + guide_w.get(feat, guide_w.get('a', 1.0)) * (log_p_good - log_p_bad))
     p_s_1 = F.softmax(torch.log(p_s_1)/good_model.vector_field.cat_temp_func(t_i), dim=-1)
+    class_support_mask = good_model.vector_field.get_category_support_mask(feat)
+    if class_support_mask is not None:
+        p_s_1 = p_s_1.masked_fill(
+            ~class_support_mask.unsqueeze(0), 0.0
+        )
+        p_s_1 = p_s_1 / p_s_1.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+
     
     # Campbell step
     if hasattr(good_model.vector_field, 'campbell_step'):
@@ -207,9 +215,40 @@ def _handle_categorical_feature(feat, good_model, bad_model, good_pred, bad_pred
 from molguidance.data_processing.utils import build_edge_idxs, get_batch_idxs, get_upper_edge_mask
 from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.models.ctmc_vector_field import PROPERTY_MAP
+
+def _assert_sampling_compatible(reference_model, *other_models):
+    for model in other_models:
+        if reference_model.canonical_feat_order != model.canonical_feat_order:
+            raise ValueError('guidance models use different feature schemas')
+        if getattr(reference_model, 'atom_state_vocab', None) != getattr(
+            model, 'atom_state_vocab', None
+        ):
+            raise ValueError(
+                'guidance models use different atom-state codecs'
+            )
+        for feat in reference_model.canonical_feat_order:
+            reference_support = (
+                reference_model.vector_field.get_category_support_mask(feat)
+            )
+            model_support = model.vector_field.get_category_support_mask(feat)
+            reference_signature = (
+                None if reference_support is None
+                else tuple(reference_support.detach().cpu().tolist())
+            )
+            model_signature = (
+                None if model_support is None
+                else tuple(model_support.detach().cpu().tolist())
+            )
+            if reference_signature != model_signature:
+                raise ValueError(
+                    'guidance models use different support masks'
+                )
+
+
 @torch.no_grad()
 def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w, **kwargs):
     """Sample molecules using auto-guidance with good and bad models"""
+    _assert_sampling_compatible(good_model, bad_model)
     # Initialize graph
     g = _create_batched_graph(n_atoms, kwargs.get('device', 'cuda:0'))
     upper_edge_mask = get_upper_edge_mask(g)
@@ -343,7 +382,10 @@ def _build_molecules(g, model, xt_traj=False, ep_traj=False):
                            ctmc_mol=model.parameterization == 'ctmc',
                            build_xt_traj=xt_traj,
                            build_ep_traj=ep_traj,
-                           exclude_charges=model.exclude_charges)
+                           exclude_charges=model.exclude_charges,
+                           atom_state_vocab=getattr(
+                               model, 'atom_state_vocab', None
+                           ))
             for g_i in dgl.unbatch(g)]
 
 @torch.no_grad()
@@ -365,6 +407,7 @@ def sample_with_hybrid_guidance(good_model, bad_model, cfg_model, n_atoms,
         interpolation_weight: Weight between CFG (0.0) and auto-guidance (1.0)
         **kwargs: Other sampling parameters
     """
+    _assert_sampling_compatible(good_model, bad_model, cfg_model)
     # Initialize graph and features
     g = _create_batched_graph(n_atoms, kwargs.get('device', 'cuda'))
     g = good_model.sample_prior(g, *get_batch_idxs(g), get_upper_edge_mask(g))
@@ -413,6 +456,16 @@ def sample_with_hybrid_guidance(good_model, bad_model, cfg_model, n_atoms,
                 # Interpolate
                 log_p = (1 - interpolation_weight) * log_p_cfg + interpolation_weight * log_p_auto
                 p_s_1 = F.softmax(log_p/good_model.vector_field.cat_temp_func(t[s_idx-1]), dim=-1)
+                class_support_mask = (
+                    good_model.vector_field.get_category_support_mask(feat)
+                )
+                if class_support_mask is not None:
+                    p_s_1 = p_s_1.masked_fill(
+                        ~class_support_mask.unsqueeze(0), 0.0
+                    )
+                    p_s_1 = p_s_1 / p_s_1.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1e-9)
                 
                 _update_categorical_feature(g, feat, p_s_1, good_model, s_idx, t, 
                     alpha_t, alpha_t_prime, kwargs.get('stochasticity'),

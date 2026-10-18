@@ -79,13 +79,7 @@ class CTMCVectorField(EndpointVectorField):
         if self.dfm_type not in ['campbell', 'gat', 'campbell_rate_matrix']:
             raise ValueError(f"Invalid dfm_type: {self.dfm_type}")
 
-        self.mask_idxs = { # for each categorical feature, the index of the mask token
-            'a': self.n_atom_types,
-            'c': self.n_charges,
-            'e': self.n_bond_types,
-        }
-        if self.n_hydrogen_counts > 0:
-            self.mask_idxs['h'] = self.n_hydrogen_counts
+        self.mask_idxs = dict(self.n_cat_feats)
 
         # Two separate embeddings for conditional and unconditional cases
         input_dim_base = self.node_input_dim
@@ -602,15 +596,9 @@ class CTMCVectorField(EndpointVectorField):
             # Gather base features
             time_tensor = t[:, 0] if len(t.shape) > 1 else t
             
-            base_features = [
-                g.ndata['a_t'],
-                time_tensor[node_batch_idx].unsqueeze(-1)
-            ]
-            if not self.exclude_charges:
-                base_features.append(g.ndata['c_t'])
-            if self.n_hydrogen_counts > 0:
-                base_features.append(g.ndata['h_t'])
-            base_features = torch.cat(base_features, dim=-1)
+            base_features = self.build_node_scalar_inputs(
+                g, time_tensor, node_batch_idx
+            )
             node_scalar_features = self.scalar_embedding_uncond(base_features)
 
             try:
@@ -729,19 +717,11 @@ class CTMCVectorField(EndpointVectorField):
                         edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
 
             
-            # predict final charges and atom type logits
-            node_scalar_features = self.node_output_head(node_scalar_features)
-            atom_type_logits = node_scalar_features[:, :self.n_atom_types]
-            output_offset = self.n_atom_types
-            if not self.exclude_charges:
-                atom_charge_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_charges
-                ]
-                output_offset += self.n_charges
-            if self.n_hydrogen_counts > 0:
-                atom_hydrogen_logits = node_scalar_features[
-                    :, output_offset:output_offset + self.n_hydrogen_counts
-                ]
+            # predict final categorical node states
+            node_logits = self.split_node_output(
+                self.node_output_head(node_scalar_features),
+                enforce_support=apply_softmax,
+            )
 
             # predict the final edge logits
             ue_feats = edge_features[upper_edge_mask]
@@ -755,15 +735,7 @@ class CTMCVectorField(EndpointVectorField):
                 node_positions = g.ndata['x_1_pred']
 
         # build a dictionary of predicted features
-        dst_dict = {
-            'x': node_positions,
-            'a': atom_type_logits,
-            'e': edge_logits
-        }
-        if not self.exclude_charges:
-            dst_dict['c'] = atom_charge_logits
-        if self.n_hydrogen_counts > 0:
-            dst_dict['h'] = atom_hydrogen_logits
+        dst_dict = {'x': node_positions, **node_logits, 'e': edge_logits}
 
         # apply softmax to categorical features, if requested
         # at training time, we don't want to apply softmax because we use cross-entropy loss which includes softmax

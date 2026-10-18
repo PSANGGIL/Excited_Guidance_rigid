@@ -194,6 +194,8 @@ class ClassifierFreeGuidance(FlowMol):
         self.vector_field = CFGVectorField(n_atom_types=self.n_atom_types,
                                             canonical_feat_order=self.canonical_feat_order,
                                             interpolant_scheduler=self.interpolant_scheduler, 
+                                            n_atom_states=self.n_atom_states,
+                                            category_support_masks=self.category_support_masks,
                                             n_charges=self.n_atom_charges, 
                                             n_bond_types=self.n_bond_types,
                                             n_hydrogen_counts=self.n_hydrogen_counts,
@@ -317,6 +319,13 @@ class ClassifierFreeGuidance(FlowMol):
                     xt_idxs = data_src[f'{feat}_t'].argmax(-1)
                 # note that we use the default ignore_index of the CrossEntropyLoss class here
                 target[ xt_idxs != self.n_cat_dict[feat] ] = -100 # set the target to ignore_index when the feature is already unmasked in xt
+
+                support = self.vector_field.get_category_support_mask(feat)
+                if support is not None and target.ndim == 1:
+                    unsupported_target = ~support[target.clamp_min(0)]
+                    # Keep validation on the train-supported vocabulary.
+                    target[unsupported_target & (target != -100)] = -100
+
 
             targets[feat] = target
 
@@ -451,6 +460,7 @@ class ClassifierFreeGuidance(FlowMol):
                 ctmc_mol=ctmc_mol,
                 build_xt_traj=xt_traj,
                 build_ep_traj=ep_traj,
+                atom_state_vocab=self.atom_state_vocab,
                 residual_mask_policy=residual_mask_policy,
                 exclude_charges=self.exclude_charges))
 
@@ -757,6 +767,7 @@ class CFGVectorField(CTMCVectorField):
                 data_src = g.edata
             else:
                 data_src = g.ndata
+            class_support_mask = self.get_category_support_mask(feat)
 
             xt = data_src[f'{feat}_t'].argmax(-1)
 
@@ -776,14 +787,21 @@ class CFGVectorField(CTMCVectorField):
                 # Get log probabilities
                 uncond_val = F.softmax(uncond_pred[feat], dim=-1)
                 cond_val = F.softmax(cond_pred[feat], dim=-1)
-                log_p_uncond = torch.log(uncond_val)
-                log_p_cond = torch.log(cond_val)
-                # Compute probabilities with guidance
-                p_s_1 = torch.exp(log_p_uncond + guide_weight * (log_p_cond - log_p_uncond))
-
-                # Normalize to ensure valid probabilities
-                p_s_1 = p_s_1 / p_s_1.sum(dim=-1, keepdim=True)
-                p_s_1 = F.softmax(torch.log(p_s_1)/temperature, dim=-1)
+                p_s_1 = combine_guided_endpoint_probabilities(
+                    uncond_val,
+                    cond_val,
+                    guide_weight,
+                    temperature=temperature,
+                    guidance_format=guidance_format,
+                    probability_mode=categorical_probability_mode,
+                )
+                if class_support_mask is not None:
+                    p_s_1 = p_s_1.masked_fill(
+                        ~class_support_mask.unsqueeze(0), 0.0
+                    )
+                    p_s_1 = p_s_1 / p_s_1.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1e-9)
 
                 xt, x_1_sampled = self.campbell_step(
                     p_1_given_t=p_s_1,
@@ -829,7 +847,8 @@ class CFGVectorField(CTMCVectorField):
                     eps=1e-9,
                     guidance_format=guidance_format,
                     where_to_apply_guide=where_to_apply_guide,
-                    temperature=temperature
+                    temperature=temperature,
+                    class_support_mask=class_support_mask,
                 )
 
             # Handle edge features
@@ -866,7 +885,8 @@ class CFGVectorField(CTMCVectorField):
                                         eps: float = 1e-9,
                                         guidance_format: str = "linear",
                                         where_to_apply_guide: str = "probabilities",
-                                        temperature: float = 1.0
+                                        temperature: float = 1.0,
+                                        class_support_mask: torch.Tensor | None = None,
                                         ): 
         """
         Modified campbell_step that applies CFG to rate matrices (paper's approach)
@@ -920,6 +940,18 @@ class CFGVectorField(CTMCVectorField):
             R_t_guided = CFGVectorField._compute_rate_matrix(p_s_1, xt, alpha_t, alpha_t_prime,
                                                 stochasticity, mask_index, n_classes)
 
+        if class_support_mask is not None:
+            class_support_mask = class_support_mask.to(
+                device=device, dtype=torch.bool
+            )
+            if class_support_mask.shape != (mask_index,):
+                raise ValueError(
+                    f'class support mask must have shape ({mask_index},), '
+                    f'got {tuple(class_support_mask.shape)}'
+                )
+            R_t_guided[:, :mask_index].masked_fill_(
+                ~class_support_mask.unsqueeze(0), 0.0
+            )
         # Step 3: Re-normalize rate matrix (diagonal = -row_sum)
         R_t_guided.scatter_(-1, xt.unsqueeze(-1), 0.0)  # Clear diagonal
         row_sums = R_t_guided.sum(dim=-1, keepdim=True)
@@ -939,6 +971,9 @@ class CFGVectorField(CTMCVectorField):
             # For last step, create guided logits with S+1 dimensions
             guided_logits_full = torch.zeros(uncond_val.shape[0], n_classes, device=device)
             guided_logits_full[:, :uncond_val.shape[-1]] = (1 - guide_weight) * uncond_val + guide_weight * cond_val
+            if class_support_mask is not None:
+                guided_logits_full[:, :mask_index].masked_fill_(
+                    ~class_support_mask.unsqueeze(0), -1e9)
             guided_logits_full[:, mask_index] = -1e9 # Never choose mask in final step
             
             is_masked = (xt == mask_index)
@@ -956,6 +991,9 @@ class CFGVectorField(CTMCVectorField):
         log_p_cond_full[:, :p_1_given_t_cond.shape[-1]] = torch.log(p_1_given_t_cond + eps)
 
         log_p_guided = (1 - guide_weight) * log_p_uncond_full + guide_weight * log_p_cond_full # just for x1 for visualization
+        if class_support_mask is not None:
+            log_p_guided[:, :mask_index].masked_fill_(
+                ~class_support_mask.unsqueeze(0), LARGE_NEG)
 
         # Debug: Check for NaN before softmax
         if torch.isnan(log_p_guided).any():

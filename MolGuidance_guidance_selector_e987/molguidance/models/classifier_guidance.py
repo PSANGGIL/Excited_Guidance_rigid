@@ -34,6 +34,13 @@ class ClassifierGuidanceFlowMol(FlowMol):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.use_joint_atom_state:
+            raise NotImplementedError(
+                'classifier guidance needs a property classifier trained on '
+                'the joint atom-state feature s; legacy a/c classifiers are '
+                'not representation-compatible'
+            )
+
 
         vector_field_config = kwargs.get("vector_field_config", {})
         self.conditional_generation = False
@@ -152,7 +159,8 @@ class ClassifierGuidanceFlowMol(FlowMol):
                 ctmc_mol=ctmc_mol, 
                 build_xt_traj=xt_traj,
                 build_ep_traj=ep_traj,
-                exclude_charges=self.exclude_charges))
+                exclude_charges=self.exclude_charges,
+                atom_state_vocab=self.atom_state_vocab))
 
         return molecules
 

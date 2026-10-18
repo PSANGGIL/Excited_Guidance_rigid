@@ -44,6 +44,25 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
     Returns:
         List of SampledMolecule objects
     """
+    if good_model.canonical_feat_order != bad_model.canonical_feat_order:
+        raise ValueError('auto-guidance models use different feature schemas')
+    if getattr(good_model, 'atom_state_vocab', None) != getattr(
+        bad_model, 'atom_state_vocab', None
+    ):
+        raise ValueError('auto-guidance models use different atom-state codecs')
+    for feat in good_model.canonical_feat_order:
+        good_support = good_model.vector_field.get_category_support_mask(feat)
+        bad_support = bad_model.vector_field.get_category_support_mask(feat)
+        good_signature = None if good_support is None else tuple(
+            good_support.detach().cpu().tolist()
+        )
+        bad_signature = None if bad_support is None else tuple(
+            bad_support.detach().cpu().tolist()
+        )
+        if good_signature != bad_signature:
+            raise ValueError('auto-guidance models use different support masks')
+
+
     if xt_traj or ep_traj:
         visualize = True
     else:
@@ -206,6 +225,9 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
                 data_src = g.edata
             else:
                 data_src = g.ndata
+            class_support_mask = (
+                good_model.vector_field.get_category_support_mask(feat)
+            )
             
             xt = data_src[f'{feat}_t'].argmax(-1)
             
@@ -230,6 +252,13 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
                 p_s_1 = p_s_1 / p_s_1.sum(dim=-1, keepdim=True)
 
                 p_s_1 = F.softmax(torch.log(p_s_1)/temperature, dim=-1)
+                if class_support_mask is not None:
+                    p_s_1 = p_s_1.masked_fill(
+                        ~class_support_mask.unsqueeze(0), 0.0
+                    )
+                    p_s_1 = p_s_1 / p_s_1.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1e-9)
                 
                 xt, x_1_sampled = good_model.vector_field.campbell_step(
                     p_1_given_t=p_s_1,
@@ -275,7 +304,8 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
                     eps=1e-9,
                     guidance_format=guidance_format,
                     where_to_apply_guide=where_to_apply_guide,
-                    temperature=temperature
+                    temperature=temperature,
+                    class_support_mask=class_support_mask,
                 )
 
             # Handle edge features
@@ -349,7 +379,8 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
             ctmc_mol=is_ctmc,
             build_xt_traj=xt_traj,
             build_ep_traj=ep_traj,
-            exclude_charges=good_model.exclude_charges))
+            exclude_charges=good_model.exclude_charges,
+            atom_state_vocab=getattr(good_model, 'atom_state_vocab', None)))
     
     return molecules
 
@@ -376,6 +407,7 @@ def sample_molecules_with_auto_guidance(good_model, bad_model, n_mols, guide_w1,
     guide_w = {}
     guide_w['x'] = guide_w1
     guide_w['a'] = guide_w2
+    guide_w['s'] = guide_w2
     guide_w['c'] = guide_w2
     guide_w['e'] = guide_w2
     molecules = []
