@@ -212,6 +212,7 @@ class ClassifierFreeGuidance(FlowMol):
         t: torch.Tensor | None = None,
         corruption_generator: torch.Generator | None = None,
         condition_dropout: bool | None = None,
+        self_conditioning: bool | None = None,
     ):
         """
         Modified forward pass that handles both conditional and unconditional embeddings.
@@ -282,7 +283,14 @@ class ClassifierFreeGuidance(FlowMol):
         )
 
         # forward pass for the vector field
-        vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask)
+        vf_output = self.predict_endpoint(
+            g,
+            t_combined,
+            node_batch_idx,
+            upper_edge_mask,
+            corruption_generator=corruption_generator,
+            self_conditioning=self_conditioning,
+        )
 
         # get the target (label) for each feature
         targets = {}
@@ -630,6 +638,11 @@ class CFGVectorField(CTMCVectorField):
                 traj_frames[feat] = [init_frame]
                 traj_frames[f'{feat}_1_pred'] = []
 
+        # CFG branches receive different conditions and therefore must carry
+        # separate endpoint histories.
+        previous_unconditional_endpoint = None
+        previous_conditional_endpoint = None
+
         # Integration loop
         for s_idx in range(1, t.shape[0]):
             s_i = t[s_idx]
@@ -637,9 +650,17 @@ class CFGVectorField(CTMCVectorField):
             dt = s_i - t_i
             last_step = (s_idx == t.shape[0] - 1)
 
-            g = self.step_with_CFG_guidance(g, s_i, t_i, 
+            (
+                g,
+                previous_unconditional_endpoint,
+                previous_conditional_endpoint,
+            ) = self.step_with_CFG_guidance(
+                                        g, s_i, t_i,
                                         alpha_t[s_idx - 1], alpha_t[s_idx], alpha_t_prime[s_idx - 1],
                                         node_batch_idx, edge_batch_idx, upper_edge_mask,
+                                        previous_unconditional_endpoint=previous_unconditional_endpoint,
+                                        previous_conditional_endpoint=previous_conditional_endpoint,
+                                        return_endpoints=True,
                                         guide_w=guide_w,
                                         cat_temp_func=cat_temp_func,
                                         forward_weight_func=forward_weight_func,
@@ -723,6 +744,9 @@ class CFGVectorField(CTMCVectorField):
                         where_to_apply_guide: str = "probabilities",  # 'probabilities' or 'rate_matrix'
                         categorical_temperature: float | None = None,
                         categorical_probability_mode: str = "corrected",
+                        previous_unconditional_endpoint: dict[str, torch.Tensor] | None = None,
+                        previous_conditional_endpoint: dict[str, torch.Tensor] | None = None,
+                        return_endpoints: bool = False,
                         **kwargs):
 
         # Get predictions from unconditional and conditional models
@@ -735,7 +759,8 @@ class CFGVectorField(CTMCVectorField):
                     node_batch_idx=node_batch_idx,
                     upper_edge_mask=upper_edge_mask,
                     apply_softmax=False, # will do softmax later
-                    remove_com=True) 
+                    remove_com=True,
+                    previous_endpoint=previous_unconditional_endpoint)
         
         # the forward function in CTMCVectorField class of ctmc_vector_field.py will take care of conditional embeddings,
         # it match case 2 of forward function adn will handle the conditional embeddings with the time t_i
@@ -743,7 +768,15 @@ class CFGVectorField(CTMCVectorField):
                                 node_batch_idx=node_batch_idx,
                                 upper_edge_mask=upper_edge_mask,
                                 apply_softmax=False,
-                                remove_com=True)
+                                remove_com=True,
+                                previous_endpoint=previous_conditional_endpoint)
+
+        next_unconditional_endpoint = self.prepare_self_conditioning_endpoint(
+            uncond_pred, categorical_are_logits=True
+        )
+        next_conditional_endpoint = self.prepare_self_conditioning_endpoint(
+            cond_pred, categorical_are_logits=True
+        )
 
         dt = s_i - t_i
 
@@ -871,6 +904,12 @@ class CFGVectorField(CTMCVectorField):
             data_src[f'{feat}_t'] = xt
             data_src[f'{feat}_1_pred'] = x_1_sampled
 
+        if return_endpoints:
+            return (
+                g,
+                next_unconditional_endpoint,
+                next_conditional_endpoint,
+            )
         return g
     
     @staticmethod 
@@ -1024,23 +1063,23 @@ class CFGVectorField(CTMCVectorField):
         device = p_1_given_t.device
         N = xt.shape[0] # N.shape = B * D, where B is batch size and D is number of nodes/edges
         S_actual = p_1_given_t.shape[-1]  # Number of actual classes (S)
-        
+
         # Create full rate matrix for all S+1 classes
         R_t = torch.zeros(N, n_classes, device=device)  # Shape: [N, S+1]
 
         # Masks for current state
         is_masked = (xt == mask_index).float().unsqueeze(-1)  # [N, 1]
         is_unmasked = 1 - is_masked
-        
+
         # Unmasking rates: from mask to any non-mask state
         # Rate = p(x1=j|xt) * (alpha_t_prime + stochasticity*alpha_t) / (1 - alpha_t)
         unmasking_factor = (alpha_t_prime + stochasticity * alpha_t) / (1 - alpha_t + 1e-8)
 
         # Only fill the actual class positions (0 to S-1), leave mask position (S) as 0
         R_t[:, :S_actual] = is_masked * p_1_given_t * unmasking_factor
-        
+
         # Remasking rates: from actual classes to mask token
         # For nodes that are currently unmasked, add rate to transition to mask
         R_t[:, mask_index] = is_unmasked.squeeze(-1) * stochasticity
-        
+
         return R_t

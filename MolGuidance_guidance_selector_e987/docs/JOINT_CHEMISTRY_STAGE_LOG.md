@@ -360,3 +360,128 @@ generation. The loss weights are safe initial scales from an untrained smoke
 batch, not an optimized Pareto point. Long training remains deferred until the
 next isolated self-conditioning/recycling stage is implemented and checked for
 train-sample consistency.
+
+
+## Stage 4: residual endpoint self-conditioning
+
+### Literature contract and distinction from hidden recycling
+
+FlowMol3 defines self-conditioning as an optional previous endpoint estimate
+fed back alongside the current noisy molecule. During training it uses a
+detached first prediction on 50% of updates and computes loss only on a second
+pass; during inference it always carries the endpoint from the preceding
+integration step. Megalodon independently reports an outer residual
+self-conditioning wrapper for joint coordinates and discrete molecular states.
+
+- FlowMol3 paper: <https://arxiv.org/abs/2508.12629>
+- FlowMol3 official implementation: <https://github.com/Dunni3/FlowMol>
+- Megalodon official implementation: <https://github.com/NVIDIA-Digital-Bio/megalodon>
+
+The existing `n_recycles` loop was audited before this change. It repeats the
+same GVP/update layers over hidden features inside one network call, but never
+feeds an endpoint prediction back into the network. It remains available as
+weight-shared hidden depth and is not renamed or treated as
+self-conditioning.
+
+### Implemented state and residual
+
+Let the first endpoint prediction be `z_hat_1`. The feedback state is
+
+`z_sc = stop_gradient({x_hat_1, softmax(s_hat_1), softmax(e_hat_1)})`.
+
+For legacy non-joint configurations the node probability block is the
+concatenation of every enabled node category. For the Stage-4 joint codec it is
+the 37-state atom/charge/H probability vector. Train-unsupported joint states
+are masked before softmax, so self-conditioning cannot feed an excluded class
+back into the network.
+
+The residual node input concatenates the current node hidden representation,
+the previous node endpoint probabilities, and an RBF expansion of
+`||x_hat_1_previous - x_t||`. The residual edge input concatenates the current
+directed-edge hidden representation, the previous undirected edge
+probabilities, and the difference between previous-endpoint and current
+pair-distance RBFs. Learned MLP outputs are added to the node and edge hidden
+states immediately before the GVP update stack. Coordinates are not directly
+overwritten.
+
+Only distances and same-frame displacement norms enter scalar residuals.
+Therefore applying one rigid rotation and translation to both current and
+previous coordinates leaves the residual scalars unchanged and preserves the
+E(3)-equivariance of the downstream GVP coordinate update.
+
+### Train, validation, and reverse-sampling behavior
+
+- `self_conditioning_rate` is a graph-batch-level Bernoulli choice. Stage 4
+  sets it to 0.5.
+- A selected training update corrupts the graph once, computes one endpoint
+  under `no_grad`, canonicalizes/detaches it, and performs the gradient-bearing
+  second pass on exactly the same noisy graph, timestep, condition embedding,
+  CFG condition-dropout mask, and guidance scale.
+- The unselected half performs one ordinary endpoint pass.
+- Deterministic validation always uses the two-pass path so checkpoint metrics
+  measure the inference-like architecture without a random mixture.
+- Ordinary CTMC and scale-aware MG samplers carry the endpoint from one reverse
+  step to the next. The first reverse step has no previous endpoint.
+- CFG maintains separate unconditional and conditional endpoint histories.
+  Feeding a guided mixture or one branch into the other would change the
+  model's conditioning semantics and is explicitly avoided.
+- Auto-guidance likewise maintains independent good-model and inferior-model
+  endpoint histories. Classifier-guidance carries its base-model endpoint
+  before applying external property gradients. The legacy hybrid sampler now
+  maintains all four good/bad/CFG-unconditional/CFG-conditional histories
+  independently and combines schedule-correct coordinate velocities rather
+  than treating endpoint coordinates as velocities.
+- Endpoint feedback is prepared before categorical temperature or stochastic
+  state sampling. It therefore represents the network's endpoint belief, not
+  one random reverse transition.
+
+The schema guard requires `vector_field.self_conditioning: true` and a
+positive `mol_fm.self_conditioning_rate` together, checks the rate is in
+`[0,1]`, and currently restricts the feature to CTMC. All older configurations
+default to both disabled.
+
+### Isolation and checkpoint contract
+
+The isolated configuration is
+`configs/local/guidance_est/hp1kg_est_cfg_joint_kekule_stage4_self_conditioning.yaml`.
+It reuses the read-only Stage-3 data tensors and chemistry losses but writes to
+a distinct Stage-4 run directory.
+
+With self-conditioning disabled, no new module parameters exist and the
+Stage-3 state-dict contract is unchanged. Enabling it adds exactly eight MLP
+parameter tensors (186,880 parameters for the production dimensions). A direct
+Stage-3/Stage-4 comparison found 634 common tensor names with identical shapes,
+zero removed tensors, and only those eight new tensors. A fresh run is required
+for the controlled Stage-4 ablation; silently initializing those tensors while
+claiming exact checkpoint continuation would be misleading.
+
+### Verification (2026-10-18)
+
+- Eight focused tests passed: support projection and normalization, detached
+  feedback, NaN/zero-mass probability fallback, disabled-architecture
+  compatibility, E(3) invariance, no-gradient first pass with identical inputs,
+  CFG branch separation, hybrid CFG branch separation, and schema guards.
+- The complete repository suite passed all 45 tests after the integration.
+- A rigid rotation plus translation changed residual node/edge outputs by less
+  than 2e-6.
+- The production Stage-4 YAML instantiated `ClassifierFreeGuidance` with a
+  `CFGVectorField`, joint `[x,s,e]` state, rate 0.5, 7,294,617 total
+  parameters, and 186,880 self-conditioner parameters.
+- On a real six-atom HP1KG training graph at t=0.5, the full two-pass CFG
+  forward and backward were finite. Total weighted loss was 4.03564 and all
+  eight self-conditioner parameter tensors received finite gradient; their
+  stacked norm was 1.66711.
+- An untrained production model completed a three-timepoint CFG reverse smoke
+  for a six-atom graph and terminated with the expected joint-state and edge
+  tensor widths.
+
+### Interpretation limit
+
+This stage establishes train-sample consistency for self-conditioning; it does
+not establish better chemistry or geometry. It adds one no-gradient network
+pass on half of training updates. Inference still uses exactly one network
+evaluation per reverse step; the first step simply has no endpoint history.
+Generation-quality claims require a fresh Stage-4
+training run and matched checkpoint evaluation. Fake atoms/count correction,
+independent graph/geometry times, and bond-first geometry updates remain
+separate later stages.

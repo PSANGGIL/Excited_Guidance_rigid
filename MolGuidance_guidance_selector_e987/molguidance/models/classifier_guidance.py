@@ -388,6 +388,8 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
                 
             target_function = default_target_function
 
+        previous_endpoint = None
+
         # Integration loop
         for s_idx in range(1, t.shape[0]):
             s_i = t[s_idx]
@@ -395,7 +397,7 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
             dt = s_i - t_i
             last_step = (s_idx == t.shape[0] - 1)
 
-            g = self.step_with_classifier_guidance(
+            g, previous_endpoint = self.step_with_classifier_guidance(
                 g=g,
                 s_i=s_i,
                 t_i=t_i,
@@ -413,6 +415,8 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
                 stochasticity=eta,
                 high_confidence_threshold=hc_thresh,
                 last_step=last_step,
+                previous_endpoint=previous_endpoint,
+                return_endpoint=True,
                 **kwargs
             )
 
@@ -445,6 +449,8 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
         stochasticity: float = 8.0,
         high_confidence_threshold: float = 0.9,
         last_step: bool = False,
+        previous_endpoint: dict[str, torch.Tensor] | None = None,
+        return_endpoint: bool = False,
         **kwargs
     ):
         """
@@ -487,7 +493,11 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
                 upper_edge_mask=upper_edge_mask,
                 apply_softmax=False,
                 remove_com=True,
+                previous_endpoint=previous_endpoint,
             )        
+        next_previous_endpoint = self.prepare_self_conditioning_endpoint(
+            pred_dict, categorical_are_logits=True
+        )
 
         # --- POSITIONS GUIDANCE ---
         # Handle positions (x) with guidance
@@ -584,6 +594,8 @@ class ClassifierGuidanceVectorField(CTMCVectorField):
             data_src[f'{feat}_t'] = xt
             data_src[f'{feat}_1_pred'] = x_1_sampled
 
+        if return_endpoint:
+            return g, next_previous_endpoint
         return g
 
     def campbell_step_with_rate_matrix_cg(self,

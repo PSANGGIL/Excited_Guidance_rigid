@@ -65,6 +65,7 @@ class FlowMol(pl.LightningModule):
                  validation_config: dict | None = None,
                  atom_count_conditioning: dict | None = None,
                  chemistry_auxiliary: dict | None = None,
+                 self_conditioning_rate: float = 0.0,
                  ):
         super().__init__()
 
@@ -111,6 +112,12 @@ class FlowMol(pl.LightningModule):
         self.properties_handle_method = properties_handle_method
         self.property_embedding_dim = property_embedding_dim
         self.dataset_name = dataset_name
+        self.self_conditioning_rate = float(self_conditioning_rate)
+        if (
+            not torch.isfinite(torch.tensor(self.self_conditioning_rate))
+            or not 0.0 <= self.self_conditioning_rate <= 1.0
+        ):
+            raise ValueError("self_conditioning_rate must be finite and in [0, 1]")
 
         chemistry_defaults = {
             'edge_existence_weight': 0.0,
@@ -315,6 +322,22 @@ class FlowMol(pl.LightningModule):
                                             n_hydrogen_counts=self.n_hydrogen_counts,
                                             exclude_charges=self.exclude_charges,
                                             **vector_field_config)
+
+        if self.self_conditioning_rate > 0.0 and not self.vector_field.self_conditioning:
+            raise ValueError(
+                "self_conditioning_rate is positive but vector_field.self_conditioning "
+                "is disabled"
+            )
+        if self.vector_field.self_conditioning:
+            if self.parameterization != "ctmc":
+                raise NotImplementedError(
+                    "self-conditioning is currently implemented for CTMC only"
+                )
+            if self.self_conditioning_rate <= 0.0:
+                raise ValueError(
+                    "enabled vector-field self-conditioning requires a positive "
+                    "self_conditioning_rate"
+                )
 
         # remove charge loss function if necessary
         if self.exclude_charges:
@@ -615,6 +638,70 @@ class FlowMol(pl.LightningModule):
             graph_weights=graph_weights,
         )
 
+    def _use_self_conditioning(
+        self,
+        vector_field: nn.Module,
+        requested: bool | None,
+        generator: torch.Generator | None,
+        device: torch.device,
+    ) -> bool:
+        """Choose one graph-level self-conditioning decision for this call."""
+        if not getattr(vector_field, "self_conditioning", False):
+            return False
+        if requested is not None:
+            return bool(requested)
+        if not self.training:
+            return True
+        draw = torch.rand((), device=device, generator=generator)
+        return bool(draw < self.self_conditioning_rate)
+
+    def predict_endpoint(
+        self,
+        g: dgl.DGLGraph,
+        t: torch.Tensor,
+        node_batch_idx: torch.Tensor,
+        upper_edge_mask: torch.Tensor,
+        *,
+        corruption_generator: torch.Generator | None = None,
+        self_conditioning: bool | None = None,
+        vector_field: nn.Module | None = None,
+        **vector_field_kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Run one endpoint pass or a detached first pass plus residual pass.
+
+        Both passes consume exactly the same noisy graph, time, condition and
+        condition-dropout choice. Only the second pass contributes gradients.
+        """
+        field = self.vector_field if vector_field is None else vector_field
+        use_self_conditioning = self._use_self_conditioning(
+            field, self_conditioning, corruption_generator, g.device
+        )
+        previous_endpoint = None
+        if use_self_conditioning:
+            with torch.no_grad():
+                first_endpoint = field(
+                    g,
+                    t,
+                    node_batch_idx=node_batch_idx,
+                    upper_edge_mask=upper_edge_mask,
+                    previous_endpoint=None,
+                    **vector_field_kwargs,
+                )
+            previous_endpoint = field.prepare_self_conditioning_endpoint(
+                first_endpoint,
+                categorical_are_logits=not bool(
+                    vector_field_kwargs.get("apply_softmax", False)
+                ),
+            )
+        return field(
+            g,
+            t,
+            node_batch_idx=node_batch_idx,
+            upper_edge_mask=upper_edge_mask,
+            previous_endpoint=previous_endpoint,
+            **vector_field_kwargs,
+        )
+
     def deterministic_validation_losses(self, g: dgl.DGLGraph, batch_idx: int):
         """Evaluate a fixed time/noise grid with conditioning always enabled."""
 
@@ -631,6 +718,7 @@ class FlowMol(pl.LightningModule):
                     t=time,
                     corruption_generator=generator,
                     condition_dropout=False,
+                    self_conditioning=True,
                 )
             )
 
@@ -671,6 +759,7 @@ class FlowMol(pl.LightningModule):
                     ),
                     corruption_generator=self._seeded_generator(g.device, seed),
                     condition_dropout=False,
+                    self_conditioning=True,
                 )
             finally:
                 g.prop = original_property
@@ -709,6 +798,7 @@ class FlowMol(pl.LightningModule):
         t: torch.Tensor | None = None,
         corruption_generator: torch.Generator | None = None,
         condition_dropout: bool | None = None,
+        self_conditioning: bool | None = None,
     ):
         
         batch_size = g.batch_size
@@ -775,7 +865,14 @@ class FlowMol(pl.LightningModule):
         )
 
         # forward pass for the vector field
-        vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask)
+        vf_output = self.predict_endpoint(
+            g,
+            t_combined,
+            node_batch_idx,
+            upper_edge_mask,
+            corruption_generator=corruption_generator,
+            self_conditioning=self_conditioning,
+        )
 
         # get the target (label) for each feature
         targets = {}

@@ -265,6 +265,7 @@ class CTMCVectorField(EndpointVectorField):
                 traj_frames[feat] = [ init_frame ]
                 traj_frames[f'{feat}_1_pred'] = []
     
+        previous_endpoint = None
         for s_idx in range(1,t.shape[0]):
 
             # get the next timepoint (s) and the current timepoint (t)
@@ -281,11 +282,13 @@ class CTMCVectorField(EndpointVectorField):
                 last_step = False
 
             # compute next step and set x_t = x_s
-            g = self.step(g, s_i, t_i, alpha_t_i, alpha_s_i, 
+            g, previous_endpoint = self.step(g, s_i, t_i, alpha_t_i, alpha_s_i,
                 alpha_t_prime_i, 
                 node_batch_idx, 
                 edge_batch_idx, 
                 upper_edge_mask, 
+                previous_endpoint=previous_endpoint,
+                return_endpoint=True,
                 cat_temp_func=cat_temp_func,
                 forward_weight_func=forward_weight_func,
                 dfm_type=dfm_type,
@@ -366,6 +369,8 @@ class CTMCVectorField(EndpointVectorField):
             property_name:str=None,
             properties_for_sampling:int|float=None,
             training_mode:bool=True,
+            previous_endpoint: dict[str, torch.Tensor] | None = None,
+            return_endpoint: bool = False,
             ):
 
         device = g.device
@@ -397,6 +402,10 @@ class CTMCVectorField(EndpointVectorField):
             upper_edge_mask=upper_edge_mask,
             apply_softmax=True,
             remove_com=True,
+            previous_endpoint=previous_endpoint,
+        )
+        next_previous_endpoint = self.prepare_self_conditioning_endpoint(
+            dst_dict, categorical_are_logits=False
         )
         
         dt = s_i - t_i
@@ -482,6 +491,8 @@ class CTMCVectorField(EndpointVectorField):
             data_src[f'{feat}_t'] = xt
             data_src[f'{feat}_1_pred'] = x_1_sampled
 
+        if return_endpoint:
+            return g, next_previous_endpoint
         return g
 
         
@@ -586,7 +597,8 @@ class CTMCVectorField(EndpointVectorField):
 ####################### conditional 
     def forward(self, g: dgl.DGLGraph, t: torch.Tensor, 
                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, 
-                apply_softmax=False, remove_com=False):
+                apply_softmax=False, remove_com=False,
+                previous_endpoint: dict[str, torch.Tensor] | None = None):
         device = g.device
         
         with g.local_scope():
@@ -687,6 +699,15 @@ class CTMCVectorField(EndpointVectorField):
             node_vec_features = torch.zeros((num_nodes, self.n_vec_channels, 3), device=device)
             edge_features = g.edata['e_t']
             edge_features = self.edge_embedding(edge_features)      
+
+            node_scalar_features, edge_features = self.apply_self_conditioning(
+                g,
+                node_scalar_features,
+                edge_features,
+                node_positions,
+                upper_edge_mask,
+                previous_endpoint,
+            )
 
             x_diff, d = self.precompute_distances(g)
             for recycle_idx in range(self.n_recycles):

@@ -4,6 +4,10 @@ import torch
 import torch.nn.functional as F
 import dgl
 
+from molguidance.models.classifier_free_guidance import (
+    combine_guided_endpoint_probabilities,
+)
+
 def sample_molecules_with_guidance(model,
                     n_mols, 
                     property_name,
@@ -263,14 +267,24 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w, **kwargs)
     # Initialize features
     _initialize_features(g, good_model)
     
+    previous_good_endpoint = None
+    previous_bad_endpoint = None
+
     # Integration loop
     for s_idx in range(1, len(t)):
         # Get predictions from both models
-        good_pred, bad_pred = _get_model_predictions(
+        (
+            good_pred,
+            bad_pred,
+            previous_good_endpoint,
+            previous_bad_endpoint,
+        ) = _get_model_predictions(
             good_model, bad_model, g, t, s_idx, 
             kwargs.get('properties_for_sampling'), 
             kwargs.get('normalization_file_path'),
-            kwargs.get('property_name')
+            kwargs.get('property_name'),
+            previous_good_endpoint,
+            previous_bad_endpoint,
         )
         
         # Update positions
@@ -317,7 +331,18 @@ def _initialize_features(g, model):
         else:
             g.ndata[f'{feat}_t'] = g.ndata[f'{feat}_0']
 
-def _get_model_predictions(good_model, bad_model, g, t, s_idx, props_sampling, norm_file, prop_name):
+def _get_model_predictions(
+    good_model,
+    bad_model,
+    g,
+    t,
+    s_idx,
+    props_sampling,
+    norm_file,
+    prop_name,
+    previous_good_endpoint=None,
+    previous_bad_endpoint=None,
+):
     """Get predictions from both models"""
     t_i = t[s_idx - 1]
     batch_size, device = g.batch_size, g.device
@@ -335,10 +360,169 @@ def _get_model_predictions(good_model, bad_model, g, t, s_idx, props_sampling, n
     upper_edge_mask = get_upper_edge_mask(g)
     
     # Get predictions from both models
-    good_pred = good_model.vector_field(g, t_combined_good, node_batch_idx, upper_edge_mask, apply_softmax=True, remove_com=True)
-    bad_pred = bad_model.vector_field(g, t_combined_bad, node_batch_idx, upper_edge_mask, apply_softmax=True, remove_com=True)
+    good_pred = good_model.vector_field(
+        g,
+        t_combined_good,
+        node_batch_idx,
+        upper_edge_mask,
+        apply_softmax=True,
+        remove_com=True,
+        previous_endpoint=previous_good_endpoint,
+    )
+    bad_pred = bad_model.vector_field(
+        g,
+        t_combined_bad,
+        node_batch_idx,
+        upper_edge_mask,
+        apply_softmax=True,
+        remove_com=True,
+        previous_endpoint=previous_bad_endpoint,
+    )
+    next_good_endpoint = (
+        good_model.vector_field.prepare_self_conditioning_endpoint(
+            good_pred, categorical_are_logits=False
+        )
+    )
+    next_bad_endpoint = (
+        bad_model.vector_field.prepare_self_conditioning_endpoint(
+            bad_pred, categorical_are_logits=False
+        )
+    )
     
-    return good_pred, bad_pred
+    return good_pred, bad_pred, next_good_endpoint, next_bad_endpoint
+
+
+def _get_cfg_branch_predictions(
+    cfg_model,
+    g,
+    t_i,
+    node_batch_idx,
+    upper_edge_mask,
+    property_value,
+    normalization_file_path=None,
+    property_name=None,
+    previous_unconditional_endpoint=None,
+    previous_conditional_endpoint=None,
+):
+    """Predict CFG branches while preserving branch-local endpoint history."""
+    batch_size, device = g.batch_size, g.device
+    conditional_embedding = _prepare_property_embedding(
+        cfg_model,
+        property_value,
+        batch_size,
+        device,
+        normalization_file_path,
+        property_name,
+    )
+    unconditional_embedding = cfg_model.unconditional_embedder(
+        batch_size, device=device
+    )
+    time_column = torch.full(
+        (batch_size, 1), t_i, device=device, dtype=torch.float32
+    )
+    unconditional_time = torch.cat(
+        (time_column, unconditional_embedding), dim=-1
+    )
+    conditional_time = torch.cat(
+        (time_column, conditional_embedding), dim=-1
+    )
+
+    unconditional_prediction = cfg_model.vector_field(
+        g,
+        unconditional_time,
+        node_batch_idx,
+        upper_edge_mask,
+        apply_softmax=False,
+        remove_com=True,
+        previous_endpoint=previous_unconditional_endpoint,
+    )
+    conditional_prediction = cfg_model.vector_field(
+        g,
+        conditional_time,
+        node_batch_idx,
+        upper_edge_mask,
+        apply_softmax=False,
+        remove_com=True,
+        previous_endpoint=previous_conditional_endpoint,
+    )
+    next_unconditional_endpoint = (
+        cfg_model.vector_field.prepare_self_conditioning_endpoint(
+            unconditional_prediction, categorical_are_logits=True
+        )
+    )
+    next_conditional_endpoint = (
+        cfg_model.vector_field.prepare_self_conditioning_endpoint(
+            conditional_prediction, categorical_are_logits=True
+        )
+    )
+    return (
+        unconditional_prediction,
+        conditional_prediction,
+        next_unconditional_endpoint,
+        next_conditional_endpoint,
+    )
+
+
+def _advance_categorical_endpoint(
+    g,
+    feat,
+    endpoint_probabilities,
+    model,
+    feat_idx,
+    s_idx,
+    t,
+    alpha_t,
+    alpha_t_prime,
+    node_batch_idx,
+    edge_batch_idx,
+    upper_edge_mask,
+    stochasticity=None,
+    high_confidence_threshold=None,
+):
+    """Advance one categorical CTMC state from endpoint probabilities."""
+    data_src = g.edata if feat == "e" else g.ndata
+    xt = data_src[f"{feat}_t"].argmax(-1)
+    if feat == "e":
+        xt = xt[upper_edge_mask]
+
+    actual_stochasticity = (
+        model.vector_field.eta
+        if stochasticity is None
+        else stochasticity
+    )
+    actual_threshold = (
+        model.vector_field.hc_thresh
+        if high_confidence_threshold is None
+        else high_confidence_threshold
+    )
+    xt, x_1_sampled = model.vector_field.campbell_step(
+        p_1_given_t=endpoint_probabilities,
+        xt=xt,
+        stochasticity=actual_stochasticity,
+        hc_thresh=actual_threshold,
+        alpha_t=alpha_t[s_idx - 1][feat_idx],
+        alpha_t_prime=alpha_t_prime[s_idx - 1][feat_idx],
+        dt=t[s_idx] - t[s_idx - 1],
+        batch_size=g.batch_size,
+        batch_num_nodes=(
+            g.batch_num_edges() // 2
+            if feat == "e"
+            else g.batch_num_nodes()
+        ),
+        n_classes=model.vector_field.n_cat_feats[feat] + 1,
+        mask_index=model.vector_field.mask_idxs[feat],
+        last_step=s_idx == len(t) - 1,
+        batch_idx=(
+            edge_batch_idx[upper_edge_mask]
+            if feat == "e"
+            else node_batch_idx
+        ),
+    )
+    if feat == "e":
+        xt, x_1_sampled = _handle_edge_features(xt, x_1_sampled, g)
+    data_src[f"{feat}_t"] = xt
+    data_src[f"{feat}_1_pred"] = x_1_sampled
+
 
 def _update_positions(g, good_pred, bad_pred, guide_w, dt):
     """Update position features using guided predictions"""
@@ -389,86 +573,175 @@ def _build_molecules(g, model, xt_traj=False, ep_traj=False):
             for g_i in dgl.unbatch(g)]
 
 @torch.no_grad()
-def sample_with_hybrid_guidance(good_model, bad_model, cfg_model, n_atoms, 
-                             auto_guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0},
-                             cfg_guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0},
-                             interpolation_weight=0.5,  # 0: pure CFG, 1: pure auto-guidance
-                             **kwargs):
-    """
-    Sample molecules using hybrid guidance with separate weights for each method.
-    
-    Args:
-        good_model: Well-trained FlowMol model
-        bad_model: Early checkpoint FlowMol model
-        cfg_model: ClassifierFreeGuidance model
-        n_atoms: Tensor of shape (batch_size,) containing number of atoms per molecule
-        auto_guide_w: Dict with guidance weights for auto-guidance
-        cfg_guide_w: Dict with guidance weights for CFG
-        interpolation_weight: Weight between CFG (0.0) and auto-guidance (1.0)
-        **kwargs: Other sampling parameters
+def sample_with_hybrid_guidance(
+    good_model,
+    bad_model,
+    cfg_model,
+    n_atoms,
+    auto_guide_w={"x": 2.0, "a": 1.0, "c": 1.0, "e": 1.0},
+    cfg_guide_w={"x": 2.0, "a": 1.0, "c": 1.0, "e": 1.0},
+    interpolation_weight=0.5,
+    **kwargs,
+):
+    """Sample with a log-probability blend of auto-guidance and CFG.
+
+    Each of the four denoising branches owns an independent previous-endpoint
+    history. Feeding a guided endpoint back into a branch would change the
+    model represented by that branch.
     """
     _assert_sampling_compatible(good_model, bad_model, cfg_model)
-    # Initialize graph and features
-    g = _create_batched_graph(n_atoms, kwargs.get('device', 'cuda'))
-    g = good_model.sample_prior(g, *get_batch_idxs(g), get_upper_edge_mask(g))
+    if not 0.0 <= float(interpolation_weight) <= 1.0:
+        raise ValueError("interpolation_weight must be in [0, 1]")
+
+    device = kwargs.get("device", "cuda")
+    g = _create_batched_graph(n_atoms, device)
+    upper_edge_mask = get_upper_edge_mask(g)
+    node_batch_idx, edge_batch_idx = get_batch_idxs(g)
+    g = good_model.sample_prior(g, node_batch_idx, upper_edge_mask)
     _initialize_features(g, good_model)
-    
-    # Setup integration
-    t = torch.linspace(0, 1, kwargs.get('n_timesteps', 100), device=kwargs.get('device', 'cuda'))
+
+    t = torch.linspace(0, 1, kwargs.get("n_timesteps", 100), device=device)
     alpha_t = good_model.interpolant_scheduler.alpha_t(t)
     alpha_t_prime = good_model.interpolant_scheduler.alpha_t_prime(t)
-    
+
+    previous_good_endpoint = None
+    previous_bad_endpoint = None
+    previous_cfg_unconditional_endpoint = None
+    previous_cfg_conditional_endpoint = None
+
     for s_idx in range(1, len(t)):
-        # Get predictions
-        good_pred, bad_pred = _get_model_predictions(
-            good_model, bad_model, g, t, s_idx, 
-            kwargs.get('properties_for_sampling'),
-            kwargs.get('normalization_file_path'),
-            kwargs.get('property_name')
+        (
+            good_pred,
+            bad_pred,
+            previous_good_endpoint,
+            previous_bad_endpoint,
+        ) = _get_model_predictions(
+            good_model,
+            bad_model,
+            g,
+            t,
+            s_idx,
+            kwargs.get("properties_for_sampling"),
+            kwargs.get("normalization_file_path"),
+            kwargs.get("property_name"),
+            previous_good_endpoint,
+            previous_bad_endpoint,
         )
-        
-        # Get CFG predictions with its own guidance weight
-        cfg_pred = cfg_model.vector_field(g, t_combined, 
-            node_batch_idx=node_batch_idx,
-            upper_edge_mask=upper_edge_mask,
-            guide_w=cfg_guide_w,  # Pass CFG-specific weights
-            apply_softmax=True,
-            remove_com=True
+        (
+            cfg_unconditional_pred,
+            cfg_conditional_pred,
+            previous_cfg_unconditional_endpoint,
+            previous_cfg_conditional_endpoint,
+        ) = _get_cfg_branch_predictions(
+            cfg_model,
+            g,
+            t[s_idx - 1],
+            node_batch_idx,
+            upper_edge_mask,
+            kwargs.get("properties_for_sampling"),
+            kwargs.get("normalization_file_path"),
+            kwargs.get("property_name"),
+            previous_cfg_unconditional_endpoint,
+            previous_cfg_conditional_endpoint,
         )
-        
-        # Interpolate predictions with separate weights
-        for feat in good_model.canonical_feat_order:
-            if feat == 'x':
-                # Auto-guidance velocity field with its weight
-                vf_auto = bad_pred['x'] + auto_guide_w['x'] * (good_pred['x'] - bad_pred['x'])
-                # CFG velocity field already includes its weight
-                vf_cfg = cfg_pred['x']
-                # Interpolate
-                vf = (1 - interpolation_weight) * vf_cfg + interpolation_weight * vf_auto
-                g.ndata['x_t'] = g.ndata['x_t'] + (t[s_idx] - t[s_idx-1]) * vf
-            else:
-                # Auto-guidance log probabilities with its weight
-                log_p_auto = torch.log(bad_pred[feat] + 1e-10) + auto_guide_w.get(feat, auto_guide_w.get('a', 1.0)) * (
-                    torch.log(good_pred[feat] + 1e-10) - torch.log(bad_pred[feat] + 1e-10)
+
+        for feat_idx, feat in enumerate(good_model.canonical_feat_order):
+            if feat == "x":
+                x_t = g.ndata["x_t"]
+                alpha = alpha_t[s_idx - 1][feat_idx]
+                alpha_prime = alpha_t_prime[s_idx - 1][feat_idx]
+                vf_bad = bad_model.vector_field.vector_field(
+                    x_t, bad_pred["x"], alpha, alpha_prime
                 )
-                # CFG log probabilities already include its weight
-                log_p_cfg = torch.log(cfg_pred[feat] + 1e-10)
-                # Interpolate
-                log_p = (1 - interpolation_weight) * log_p_cfg + interpolation_weight * log_p_auto
-                p_s_1 = F.softmax(log_p/good_model.vector_field.cat_temp_func(t[s_idx-1]), dim=-1)
-                class_support_mask = (
-                    good_model.vector_field.get_category_support_mask(feat)
+                vf_good = good_model.vector_field.vector_field(
+                    x_t, good_pred["x"], alpha, alpha_prime
                 )
-                if class_support_mask is not None:
-                    p_s_1 = p_s_1.masked_fill(
-                        ~class_support_mask.unsqueeze(0), 0.0
-                    )
-                    p_s_1 = p_s_1 / p_s_1.sum(
-                        dim=-1, keepdim=True
-                    ).clamp_min(1e-9)
-                
-                _update_categorical_feature(g, feat, p_s_1, good_model, s_idx, t, 
-                    alpha_t, alpha_t_prime, kwargs.get('stochasticity'),
-                    kwargs.get('high_confidence_threshold'))
-    
-    return _build_molecules(g, good_model, kwargs.get('xt_traj', False), kwargs.get('ep_traj', False))
+                vf_cfg_unconditional = cfg_model.vector_field.vector_field(
+                    x_t, cfg_unconditional_pred["x"], alpha, alpha_prime
+                )
+                vf_cfg_conditional = cfg_model.vector_field.vector_field(
+                    x_t, cfg_conditional_pred["x"], alpha, alpha_prime
+                )
+                vf_auto = vf_bad + auto_guide_w["x"] * (vf_good - vf_bad)
+                vf_cfg = vf_cfg_unconditional + cfg_guide_w["x"] * (
+                    vf_cfg_conditional - vf_cfg_unconditional
+                )
+                vf = (
+                    (1.0 - interpolation_weight) * vf_cfg
+                    + interpolation_weight * vf_auto
+                )
+                g.ndata["x_t"] = x_t + (t[s_idx] - t[s_idx - 1]) * vf
+
+                x_1_auto = bad_pred["x"] + auto_guide_w["x"] * (
+                    good_pred["x"] - bad_pred["x"]
+                )
+                x_1_cfg = cfg_unconditional_pred["x"] + cfg_guide_w["x"] * (
+                    cfg_conditional_pred["x"]
+                    - cfg_unconditional_pred["x"]
+                )
+                g.ndata["x_1_pred"] = (
+                    (1.0 - interpolation_weight) * x_1_cfg
+                    + interpolation_weight * x_1_auto
+                ).detach().clone()
+                continue
+
+            auto_probability = combine_guided_endpoint_probabilities(
+                bad_pred[feat],
+                good_pred[feat],
+                auto_guide_w.get(feat, auto_guide_w.get("a", 1.0)),
+                temperature=1.0,
+                guidance_format="log",
+                probability_mode="corrected",
+            )
+            cfg_probability = combine_guided_endpoint_probabilities(
+                F.softmax(cfg_unconditional_pred[feat], dim=-1),
+                F.softmax(cfg_conditional_pred[feat], dim=-1),
+                cfg_guide_w.get(feat, cfg_guide_w.get("a", 1.0)),
+                temperature=1.0,
+                guidance_format="log",
+                probability_mode="corrected",
+            )
+            hybrid_log_probability = (
+                (1.0 - interpolation_weight)
+                * torch.log(cfg_probability.clamp_min(1e-9))
+                + interpolation_weight
+                * torch.log(auto_probability.clamp_min(1e-9))
+            )
+            temperature = good_model.vector_field.cat_temp_func(t[s_idx - 1])
+            p_s_1 = F.softmax(
+                hybrid_log_probability / temperature, dim=-1
+            )
+            class_support_mask = (
+                good_model.vector_field.get_category_support_mask(feat)
+            )
+            if class_support_mask is not None:
+                p_s_1 = p_s_1.masked_fill(
+                    ~class_support_mask.unsqueeze(0), 0.0
+                )
+                p_s_1 = p_s_1 / p_s_1.sum(
+                    dim=-1, keepdim=True
+                ).clamp_min(1e-9)
+
+            _advance_categorical_endpoint(
+                g,
+                feat,
+                p_s_1,
+                good_model,
+                feat_idx,
+                s_idx,
+                t,
+                alpha_t,
+                alpha_t_prime,
+                node_batch_idx,
+                edge_batch_idx,
+                upper_edge_mask,
+                kwargs.get("stochasticity"),
+                kwargs.get("high_confidence_threshold"),
+            )
+
+    return _build_molecules(
+        g,
+        good_model,
+        kwargs.get("xt_traj", False),
+        kwargs.get("ep_traj", False),
+    )

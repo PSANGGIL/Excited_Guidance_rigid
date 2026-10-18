@@ -7,6 +7,7 @@ import scipy
 
 from molguidance.models.gvp import GVPConv, GVP, _rbf, _norm_no_nan
 from molguidance.models.interpolant_scheduler import InterpolantScheduler
+from molguidance.models.self_conditioning import SelfConditioningResidualLayer
 from molguidance.utils.dirflow import DirichletConditionalFlow, simplex_proj
 
 class EndpointVectorField(nn.Module):
@@ -36,6 +37,7 @@ class EndpointVectorField(nn.Module):
                     exclude_charges: bool = False,
                     continuous_inv_temp_schedule = None,
                     continuous_inv_temp_max: float = 10.0,
+                    self_conditioning: bool = False,
                     has_mask: bool = False # if we are using CTMC, input categorical features will have mask tokens,
                     # this means their one-hot representations will have an extra dimension,
                     # and the neural network instantiated by this method need to account for this
@@ -75,6 +77,7 @@ class EndpointVectorField(nn.Module):
 
         self.rbf_dmax = rbf_dmax
         self.rbf_dim = rbf_dim
+        self.self_conditioning = bool(self_conditioning)
 
         assert n_vec_channels >= 3, 'n_vec_channels must be >= 3'
 
@@ -146,6 +149,20 @@ class EndpointVectorField(nn.Module):
             nn.SiLU(),
             nn.LayerNorm(n_hidden_edge_feats)
         )
+
+        self.self_conditioner = None
+        if self.self_conditioning:
+            self.self_conditioner = SelfConditioningResidualLayer(
+                node_feature_names=self.node_categorical_feats,
+                node_feature_dims=[
+                    self.n_cat_feats[feat] for feat in self.node_categorical_feats
+                ],
+                edge_probability_dim=self.n_bond_types,
+                node_hidden_dim=self.n_hidden_scalars,
+                edge_hidden_dim=self.n_hidden_edge_feats,
+                rbf_dim=self.rbf_dim,
+                rbf_dmax=self.rbf_dmax,
+            )
 
         self.conv_layers = []
         for conv_idx in range(convs_per_update*n_molecule_updates):
@@ -244,6 +261,89 @@ class EndpointVectorField(nn.Module):
         # guide_weight=1 while still underflowing to zero after softmax.
         return logits.masked_fill(~support.unsqueeze(0), -1.0e4)
 
+    def prepare_self_conditioning_endpoint(
+        self,
+        endpoint: dict[str, torch.Tensor],
+        *,
+        categorical_are_logits: bool,
+    ) -> dict[str, torch.Tensor] | None:
+        """Detach and canonicalize an endpoint for the next denoising call.
+
+        The residual layer consumes probabilities rather than raw logits. This
+        keeps training and inference under one explicit endpoint contract and
+        applies the train-vocabulary support mask before feedback.
+        """
+        if not self.self_conditioning:
+            return None
+        expected = {"x", "e", *self.node_categorical_feats}
+        missing = expected - set(endpoint)
+        if missing:
+            raise KeyError(
+                "endpoint is missing self-conditioning features: "
+                + ", ".join(sorted(missing))
+            )
+
+        prepared = {"x": endpoint["x"].detach()}
+        for feat in (*self.node_categorical_feats, "e"):
+            value = endpoint[feat].detach()
+            support = (
+                None if feat == "e" else self.get_category_support_mask(feat)
+            )
+            if categorical_are_logits:
+                value = torch.nan_to_num(
+                    value, nan=0.0, posinf=1.0e4, neginf=-1.0e4
+                )
+                if support is not None:
+                    value = value.masked_fill(~support.unsqueeze(0), -1.0e4)
+                value = torch.softmax(value, dim=-1)
+            else:
+                value = torch.nan_to_num(
+                    value, nan=0.0, posinf=0.0, neginf=0.0
+                ).clamp_min(0.0)
+                if support is not None:
+                    value = value.masked_fill(~support.unsqueeze(0), 0.0)
+                row_mass = value.sum(dim=-1, keepdim=True)
+                if support is None:
+                    fallback = torch.full_like(
+                        value, 1.0 / value.shape[-1]
+                    )
+                else:
+                    fallback = support.to(value).expand_as(value)
+                    fallback = fallback / fallback.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1.0)
+                value = torch.where(
+                    row_mass > 1.0e-12,
+                    value / row_mass.clamp_min(1.0e-12),
+                    fallback,
+                )
+            prepared[feat] = value.detach()
+        return prepared
+
+    def apply_self_conditioning(
+        self,
+        g: dgl.DGLGraph,
+        node_scalar_features: torch.Tensor,
+        edge_features: torch.Tensor,
+        node_positions: torch.Tensor,
+        upper_edge_mask: torch.Tensor,
+        previous_endpoint: dict[str, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if previous_endpoint is None:
+            return node_scalar_features, edge_features
+        if self.self_conditioner is None:
+            raise RuntimeError(
+                "a previous endpoint was supplied but self-conditioning is disabled"
+            )
+        return self.self_conditioner(
+            g,
+            node_hidden=node_scalar_features,
+            edge_hidden=edge_features,
+            current_positions=node_positions,
+            upper_edge_mask=upper_edge_mask,
+            previous_endpoint=previous_endpoint,
+        )
+
     def build_continuous_inv_temp_func(self, schedule, max_inv_temp=None):
 
         if schedule is None:
@@ -258,7 +358,8 @@ class EndpointVectorField(nn.Module):
         
 
     def forward(self, g: dgl.DGLGraph, t: torch.Tensor, 
-                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, apply_softmax=False, remove_com=False):
+                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, apply_softmax=False, remove_com=False,
+                 previous_endpoint: dict[str, torch.Tensor] | None = None):
         """Predict x_1 (trajectory destination) given x_t"""
         device = g.device
 
@@ -281,6 +382,15 @@ class EndpointVectorField(nn.Module):
 
             edge_features = g.edata['e_t']
             edge_features = self.edge_embedding(edge_features)
+
+            node_scalar_features, edge_features = self.apply_self_conditioning(
+                g,
+                node_scalar_features,
+                edge_features,
+                node_positions,
+                upper_edge_mask,
+                previous_endpoint,
+            )
 
             x_diff, d = self.precompute_distances(g)
             for recycle_idx in range(self.n_recycles):

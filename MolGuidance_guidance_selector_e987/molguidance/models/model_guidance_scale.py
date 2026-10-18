@@ -163,7 +163,13 @@ class ModelGuidance(FlowMol):
 
         return total_loss
 
-    def forward(self, g: dgl.DGLGraph, is_training=True):
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        is_training=True,
+        corruption_generator: torch.Generator | None = None,
+        self_conditioning: bool | None = None,
+    ):
         """
         Modified forward pass that implements Model Guidance by modifying the output
         with the guidance term.
@@ -180,7 +186,9 @@ class ModelGuidance(FlowMol):
 
         # Sample random guidance values for training
         guidance_values = torch.ones(batch_size, device=device)
-        guidance_values[:num_mg] = torch.rand(num_mg, device=device) * (self.max_scale - self.min_scale) + self.min_scale
+        guidance_values[:num_mg] = torch.rand(
+            num_mg, device=device, generator=corruption_generator
+        ) * (self.max_scale - self.min_scale) + self.min_scale
         guidance_values[num_mg:num_mg+num_drop] = 0.0
 
         # Check if the attribute loss_fn_dict exists
@@ -194,7 +202,9 @@ class ModelGuidance(FlowMol):
         upper_edge_mask = get_upper_edge_mask(g)
 
         # Sample timepoints for each molecule in the batch
-        t = torch.rand(batch_size).float().to(device)
+        t = torch.rand(
+            batch_size, device=device, generator=corruption_generator
+        ).float()
 
         # Make sure prop has correct shape for the property embedder
         g.prop = g.prop.unsqueeze(-1) if g.prop.dim() == 1 else g.prop
@@ -205,19 +215,34 @@ class ModelGuidance(FlowMol):
         self.unconditional_embedder = self.unconditional_embedder.to(device)
 
         # Construct interpolated molecules
-        g = self.vector_field.sample_conditional_path(g, t, node_batch_idx, edge_batch_idx, upper_edge_mask)
+        g = self.vector_field.sample_conditional_path(
+            g,
+            t,
+            node_batch_idx,
+            edge_batch_idx,
+            upper_edge_mask,
+            generator=corruption_generator,
+        )
 
         emb_mix = torch.cat([self.property_embedder(g.prop[:num_mg]),
                              self.unconditional_embedder(g.prop[num_mg:num_mg+num_drop]),
                              self.property_embedder(g.prop[num_mg+num_drop:])], dim=0)
         t_combined = torch.cat([t.unsqueeze(-1), emb_mix], dim=-1).to(device)
 
-        # Forward pass for the conditional vector field
+        # Forward pass for the conditional vector field. The detached first
+        # pass, when selected, sees this exact noisy graph and guidance scale.
+        student_kwargs = {}
         if self.use_scale_aware:
-            vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask, 
-                                            guidance_scale=guidance_values)
-        else:
-            vf_output = self.vector_field(g, t_combined, node_batch_idx=node_batch_idx, upper_edge_mask=upper_edge_mask)
+            student_kwargs["guidance_scale"] = guidance_values
+        vf_output = self.predict_endpoint(
+            g,
+            t_combined,
+            node_batch_idx,
+            upper_edge_mask,
+            corruption_generator=corruption_generator,
+            self_conditioning=self_conditioning,
+            **student_kwargs,
+        )
         
 
         if use_mg_loss:
@@ -242,16 +267,31 @@ class ModelGuidance(FlowMol):
                 t_cond_combined = torch.cat([t_cond.unsqueeze(-1), cond_prop_emb], dim=-1).to(device)
                 t_uncond_combined = torch.cat([t_cond.unsqueeze(-1), uncond_prop_emb], dim=-1).to(device)
 
+                conditional_teacher_kwargs = {}
+                unconditional_teacher_kwargs = {}
                 if self.use_scale_aware:
-                    vf_output_cond = self.ema_vector_field(cond_g, t_cond_combined, node_batch_idx=cond_node_batch_idx, 
-                                                    upper_edge_mask=cond_upper_edge_mask, guidance_scale=1)
-                    vf_output_uncond = self.ema_vector_field(cond_g, t_uncond_combined, node_batch_idx=cond_node_batch_idx,
-                                                    upper_edge_mask=cond_upper_edge_mask, guidance_scale=0)
-                else:
-                    vf_output_cond = self.ema_vector_field(cond_g, t_cond_combined, node_batch_idx=cond_node_batch_idx, 
-                                                    upper_edge_mask=cond_upper_edge_mask)
-                    vf_output_uncond = self.ema_vector_field(cond_g, t_uncond_combined, node_batch_idx=cond_node_batch_idx,
-                                                    upper_edge_mask=cond_upper_edge_mask)
+                    conditional_teacher_kwargs["guidance_scale"] = 1
+                    unconditional_teacher_kwargs["guidance_scale"] = 0
+                # Teacher targets use the inference-like self-conditioned EMA
+                # endpoint when the architecture enables it.
+                vf_output_cond = self.predict_endpoint(
+                    cond_g,
+                    t_cond_combined,
+                    cond_node_batch_idx,
+                    cond_upper_edge_mask,
+                    self_conditioning=True,
+                    vector_field=self.ema_vector_field,
+                    **conditional_teacher_kwargs,
+                )
+                vf_output_uncond = self.predict_endpoint(
+                    cond_g,
+                    t_uncond_combined,
+                    cond_node_batch_idx,
+                    cond_upper_edge_mask,
+                    self_conditioning=True,
+                    vector_field=self.ema_vector_field,
+                    **unconditional_teacher_kwargs,
+                )
 
         # get the target (label) for each feature
         targets = {}
@@ -553,7 +593,8 @@ class ScaleAwareMGVectorField(CTMCVectorField):
     def forward(self, g: dgl.DGLGraph, t: torch.Tensor, 
                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, 
                 guidance_scale: float|torch.Tensor=None,
-                apply_softmax=False, remove_com=False):
+                apply_softmax=False, remove_com=False,
+                previous_endpoint: dict[str, torch.Tensor] | None = None):
         """
         Forward pass with integrated guidance scale.
         """
@@ -676,6 +717,15 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             node_vec_features = torch.zeros((num_nodes, self.n_vec_channels, 3), device=device)
             edge_features = g.edata['e_t']
             edge_features = self.edge_embedding(edge_features)      
+
+            node_scalar_features, edge_features = self.apply_self_conditioning(
+                g,
+                node_scalar_features,
+                edge_features,
+                node_positions,
+                upper_edge_mask,
+                previous_endpoint,
+            )
 
             x_diff, d = self.precompute_distances(g)
             for recycle_idx in range(self.n_recycles):
@@ -811,6 +861,7 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                 traj_frames[feat] = [ init_frame ]
                 traj_frames[f'{feat}_1_pred'] = []
     
+        previous_endpoint = None
         for s_idx in range(1,t.shape[0]):
 
             # get the next timepoint (s) and the current timepoint (t)
@@ -827,11 +878,13 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                 last_step = False
 
             # compute next step and set x_t = x_s
-            g = self.step(g, s_i, t_i, alpha_t_i, alpha_s_i, 
+            g, previous_endpoint = self.step(g, s_i, t_i, alpha_t_i, alpha_s_i,
                 alpha_t_prime_i, 
                 node_batch_idx, 
                 edge_batch_idx, 
                 upper_edge_mask, 
+                previous_endpoint=previous_endpoint,
+                return_endpoint=True,
                 cat_temp_func=cat_temp_func,
                 forward_weight_func=forward_weight_func,
                 dfm_type=dfm_type,
@@ -916,6 +969,8 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             training_mode:bool=True,
             guidance_scale=None,
             dataset_name: str = None,
+            previous_endpoint: dict[str, torch.Tensor] | None = None,
+            return_endpoint: bool = False,
             ):
 
         device = g.device
@@ -948,6 +1003,10 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             apply_softmax=True,
             remove_com=True,
             guidance_scale=guidance_scale,
+            previous_endpoint=previous_endpoint,
+        )
+        next_previous_endpoint = self.prepare_self_conditioning_endpoint(
+            dst_dict, categorical_are_logits=False
         )
         
         dt = s_i - t_i
@@ -1033,6 +1092,8 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             data_src[f'{feat}_t'] = xt
             data_src[f'{feat}_1_pred'] = x_1_sampled
 
+        if return_endpoint:
+            return g, next_previous_endpoint
         return g
 
 

@@ -129,6 +129,11 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
         model.vector_field.properties_handle_method = properties_handle_method
         model.vector_field.multilple_values_to_one_property = multilple_values_to_one_property
     
+    # The good and inferior models predict different endpoints; never feed a
+    # guided or cross-model estimate back as self-conditioning.
+    previous_good_endpoint = None
+    previous_bad_endpoint = None
+
     # Integration loop
     for s_idx in range(1, t.shape[0]):
         s_i = t[s_idx]
@@ -186,13 +191,26 @@ def sample_with_auto_guidance(good_model, bad_model, n_atoms, guide_w,
                             node_batch_idx=node_batch_idx,
                             upper_edge_mask=upper_edge_mask,
                             apply_softmax=False,
-                            remove_com=True)
+                            remove_com=True,
+                            previous_endpoint=previous_good_endpoint)
         
         bad_pred = bad_model.vector_field(g, t=t_combined_bad,
                             node_batch_idx=node_batch_idx,
                             upper_edge_mask=upper_edge_mask,
                             apply_softmax=False,
-                            remove_com=True)
+                            remove_com=True,
+                            previous_endpoint=previous_bad_endpoint)
+
+        previous_good_endpoint = (
+            good_model.vector_field.prepare_self_conditioning_endpoint(
+                good_pred, categorical_are_logits=True
+            )
+        )
+        previous_bad_endpoint = (
+            bad_model.vector_field.prepare_self_conditioning_endpoint(
+                bad_pred, categorical_are_logits=True
+            )
+        )
         
         # Handle positions
         x_1_bad = bad_pred['x']

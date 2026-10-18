@@ -1,5 +1,6 @@
 from molguidance.models.flowmol import FlowMol
 from pathlib import Path
+import math
 import yaml
 from molguidance.data_processing.data_module import MoleculeDataModule
 
@@ -41,6 +42,23 @@ def validate_chemistry_schema(config: dict) -> None:
             'dataset.n_bond_types and mol_fm.n_bond_types disagree: '
             f'{dataset_bond_count} != {model_bond_count}'
         )
+
+    self_conditioning = bool(
+        config.get("vector_field", {}).get("self_conditioning", False)
+    )
+    self_conditioning_rate = float(model.get("self_conditioning_rate", 0.0))
+    if (
+        not math.isfinite(self_conditioning_rate)
+        or not 0.0 <= self_conditioning_rate <= 1.0
+    ):
+        raise ValueError("mol_fm.self_conditioning_rate must be finite and in [0, 1]")
+    if self_conditioning != (self_conditioning_rate > 0.0):
+        raise ValueError(
+            "vector_field.self_conditioning and a positive "
+            "mol_fm.self_conditioning_rate must be enabled together"
+        )
+    if self_conditioning and model.get("parameterization", "ctmc") != "ctmc":
+        raise ValueError("self-conditioning is currently supported only for CTMC")
 
     chemistry_config = model.get('chemistry_auxiliary', {})
     chemistry_enabled = any(
