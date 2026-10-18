@@ -1,5 +1,6 @@
 from molguidance.models.flowmol import FlowMol
 from pathlib import Path
+import copy
 import math
 import yaml
 from molguidance.data_processing.data_module import MoleculeDataModule
@@ -59,6 +60,35 @@ def validate_chemistry_schema(config: dict) -> None:
         )
     if self_conditioning and model.get("parameterization", "ctmc") != "ctmc":
         raise ValueError("self-conditioning is currently supported only for CTMC")
+
+    fake_atom_fraction = float(model.get('fake_atom_fraction', 0.0))
+    fake_atom_std = float(model.get('fake_atom_std', 1.0))
+    fake_atom_seed = int(model.get('fake_atom_validation_seed', 17_041))
+    fake_capacity_mode = str(
+        model.get('fake_atom_capacity_mode', 'stochastic')
+    )
+    if not math.isfinite(fake_atom_fraction) or not 0.0 <= fake_atom_fraction <= 1.0:
+        raise ValueError('mol_fm.fake_atom_fraction must be finite and in [0, 1]')
+    if not math.isfinite(fake_atom_std) or fake_atom_std <= 0.0:
+        raise ValueError('mol_fm.fake_atom_std must be finite and positive')
+    if fake_atom_seed < 0:
+        raise ValueError('mol_fm.fake_atom_validation_seed must be non-negative')
+    if fake_capacity_mode not in {'stochastic', 'maximum', 'none'}:
+        raise ValueError(
+            'mol_fm.fake_atom_capacity_mode must be stochastic, maximum, or none'
+        )
+    if fake_atom_fraction > 0.0:
+        if not dataset_joint or model_state_count < 2:
+            raise ValueError('fake atoms require a joint atom-state vocabulary')
+        if model.get('parameterization', 'ctmc') != 'ctmc':
+            raise ValueError('fake atoms are currently supported only for CTMC')
+    for key, expected in (
+        ('fake_atom_fraction', fake_atom_fraction),
+        ('fake_atom_std', fake_atom_std),
+        ('fake_atom_validation_seed', fake_atom_seed),
+    ):
+        if key in dataset and dataset[key] != expected:
+            raise ValueError(f'dataset.{key} and mol_fm.{key} disagree')
 
     chemistry_config = model.get('chemistry_auxiliary', {})
     chemistry_enabled = any(
@@ -167,7 +197,15 @@ def data_module_from_config(config: dict) -> MoleculeDataModule:
     else:
         distributed = False
 
-    data_module = MoleculeDataModule(dataset_config=config['dataset'],
+    dataset_config = copy.deepcopy(config['dataset'])
+    for key, default in (
+        ('fake_atom_fraction', 0.0),
+        ('fake_atom_std', 1.0),
+        ('fake_atom_validation_seed', 17_041),
+    ):
+        dataset_config[key] = config['mol_fm'].get(key, default)
+
+    data_module = MoleculeDataModule(dataset_config=dataset_config,
                                      dm_prior_config=config['mol_fm']['prior_config'],
                                      batch_size=batch_size, 
                                      num_workers=num_workers, 

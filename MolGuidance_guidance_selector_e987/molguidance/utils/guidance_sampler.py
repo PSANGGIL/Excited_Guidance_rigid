@@ -127,11 +127,15 @@ def sample_molecules_with_auto_guidance(good_model,
         if number_of_atoms is not None:
             batch_no_atoms = number_of_atoms[len(molecules):len(molecules) + batch_size]
 
-        if number_of_atoms is None:
-            # Sample random sizes
-            atoms_per_molecule = good_model.sample_n_atoms(batch_size).to(device)
-        else:
-            atoms_per_molecule = torch.tensor(batch_no_atoms, device=device)
+        real_atoms_per_molecule = good_model.resolve_atom_counts(
+            batch_size,
+            device,
+            number_of_atoms=batch_no_atoms,
+            properties_for_sampling=property_value,
+        )
+        atoms_per_molecule = good_model.add_fake_atom_capacity(
+            real_atoms_per_molecule
+        )
 
         batch_molecules = sample_with_auto_guidance(
             good_model=good_model,

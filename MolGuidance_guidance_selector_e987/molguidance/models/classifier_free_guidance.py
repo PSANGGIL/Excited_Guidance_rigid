@@ -396,6 +396,8 @@ class ClassifierFreeGuidance(FlowMol):
         """
         if n_timesteps is None:
             n_timesteps = self.default_n_timesteps
+        if properties_handle_method is None:
+            properties_handle_method = self.properties_handle_method
 
         if xt_traj or ep_traj:
             visualize = True
@@ -491,6 +493,8 @@ class ClassifierFreeGuidance(FlowMol):
         atom_count_mode: str | None = None,
         atom_count_bandwidth: float | Sequence[float] | None = None,
         atom_count_nearest_k: int | None = None,
+        atom_count_generator: torch.Generator | None = None,
+        fake_atom_capacity_mode: str | None = None,
         guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0}, 
         dfm_type='campbell_rate_matrix',  
         guidance_format: str = "log", 
@@ -506,7 +510,7 @@ class ClassifierFreeGuidance(FlowMol):
         if multilple_values_to_one_property is not None and properties_for_sampling is not None:
             raise ValueError('You can not provide both multilple_values_to_one_property and properties_for_sampling, only one of them should be provided')
 
-        atoms_per_molecule = self.resolve_atom_counts(
+        real_atoms_per_molecule = self.resolve_atom_counts(
             n_molecules,
             device,
             number_of_atoms=number_of_atoms,
@@ -515,7 +519,17 @@ class ClassifierFreeGuidance(FlowMol):
             atom_count_mode=atom_count_mode,
             atom_count_bandwidth=atom_count_bandwidth,
             atom_count_nearest_k=atom_count_nearest_k,
+            atom_count_generator=atom_count_generator,
         )
+        atoms_per_molecule = self.add_fake_atom_capacity(
+            real_atoms_per_molecule,
+            mode=fake_atom_capacity_mode,
+            generator=atom_count_generator,
+        )
+        self.last_atom_count_diagnostics.update({
+            'real_count_mean': float(real_atoms_per_molecule.float().mean()),
+            'slot_count_mean': float(atoms_per_molecule.float().mean()),
+        })
 
         if multilple_values_to_one_property is not None:
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \

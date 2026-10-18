@@ -85,6 +85,8 @@ class ClassifierGuidanceFlowMol(FlowMol):
     ):
         if n_timesteps is None:
             n_timesteps = self.default_n_timesteps
+        if properties_handle_method is None:
+            properties_handle_method = self.properties_handle_method
 
         if xt_traj or ep_traj:
             visualize = True

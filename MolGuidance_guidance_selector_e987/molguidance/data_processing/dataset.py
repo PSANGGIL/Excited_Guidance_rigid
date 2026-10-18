@@ -1,3 +1,5 @@
+import math
+
 import torch
 from pathlib import Path
 import dgl
@@ -22,6 +24,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         # unpack some configs regarding the prior
         self.prior_config = prior_config
         self.dataset_config = dataset_config
+        self.split = split
 
         # get the condtional configuration
         self.conditioning = dataset_config.get('conditioning', {})
@@ -37,6 +40,23 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.require_chemistry_auxiliary_labels = bool(
             dataset_config.get('require_chemistry_auxiliary_labels', False)
         )
+        self.fake_atom_fraction = float(
+            dataset_config.get('fake_atom_fraction', 0.0)
+        )
+        self.fake_atom_std = float(dataset_config.get('fake_atom_std', 1.0))
+        self.fake_atom_validation_seed = int(
+            dataset_config.get('fake_atom_validation_seed', 17_041)
+        )
+        if (
+            not math.isfinite(self.fake_atom_fraction)
+            or not 0.0 <= self.fake_atom_fraction <= 1.0
+        ):
+            raise ValueError('fake_atom_fraction must be finite and in [0, 1]')
+        if not math.isfinite(self.fake_atom_std) or self.fake_atom_std <= 0.0:
+            raise ValueError('fake_atom_std must be finite and positive')
+        if self.fake_atom_validation_seed < 0:
+            raise ValueError('fake_atom_validation_seed must be non-negative')
+        self.use_fake_atoms = self.fake_atom_fraction > 0.0
         if self.use_joint_atom_state and self.n_atom_states <= 0:
             raise ValueError(
                 'n_atom_states must be positive when joint atom state is enabled'
@@ -44,6 +64,12 @@ class MoleculeDataset(torch.utils.data.Dataset):
         if self.use_joint_atom_state and self.use_hydrogen_counts:
             raise ValueError(
                 'joint atom state already contains H count; disable separate H state'
+            )
+        if self.use_fake_atoms and not self.use_joint_atom_state:
+            raise ValueError('fake atoms require the joint atom-state representation')
+        if self.use_fake_atoms and self.n_atom_states < 2:
+            raise ValueError(
+                'fake atoms require at least one real state plus the fake state'
             )
         if self.n_bond_types <= 1:
             raise ValueError(
@@ -181,6 +207,78 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.node_idx_array.shape[0]
+
+    def _fake_atom_generator(self, idx: int) -> torch.Generator | None:
+        """Use worker RNG for training and a molecule-local RNG for evaluation."""
+        if self.split in {'train', 'train_a', 'train_b'}:
+            return None
+        split_offset = {'val': 1_000_000, 'test': 2_000_000}.get(
+            self.split, 3_000_000
+        )
+        generator = torch.Generator(device='cpu')
+        generator.manual_seed(
+            self.fake_atom_validation_seed + split_offset + int(idx)
+        )
+        return generator
+
+    def _augment_with_fake_atoms(
+        self,
+        positions: torch.Tensor,
+        atom_types: torch.Tensor,
+        atom_charges: torch.Tensor,
+        atom_states: torch.Tensor,
+        idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Append FlowMol3-style anchored fake nodes before graph construction.
+
+        The last joint atom-state class is reserved for the synthetic fake
+        state. Fake nodes have no target bonds because the complete adjacency
+        is built only after they have been appended.
+        """
+        n_real = int(positions.shape[0])
+        if n_real <= 0:
+            raise ValueError('fake-atom augmentation requires a non-empty molecule')
+        generator = self._fake_atom_generator(idx)
+        max_fake = int(math.ceil(n_real * self.fake_atom_fraction))
+        n_fake = int(
+            torch.randint(
+                low=0,
+                high=max_fake + 1,
+                size=(1,),
+                generator=generator,
+            ).item()
+        )
+        is_real = torch.ones(n_real + n_fake, dtype=torch.bool)
+        if n_fake == 0:
+            return positions, atom_types, atom_charges, atom_states, is_real
+
+        anchor_indices = torch.randint(
+            low=0,
+            high=n_real,
+            size=(n_fake,),
+            generator=generator,
+        )
+        offsets = torch.randn(
+            (n_fake, positions.shape[-1]),
+            generator=generator,
+            dtype=positions.dtype,
+        ) * self.fake_atom_std
+        fake_positions = positions[anchor_indices] + offsets
+        fake_atom_types = atom_types.new_zeros(
+            (n_fake, atom_types.shape[-1])
+        )
+        fake_charges = atom_charges.new_zeros(n_fake)
+        fake_states = atom_states.new_full(
+            (n_fake,), self.n_atom_states - 1
+        )
+        is_real[n_real:] = False
+        return (
+            torch.cat((positions, fake_positions), dim=0),
+            torch.cat((atom_types, fake_atom_types), dim=0),
+            torch.cat((atom_charges, fake_charges), dim=0),
+            torch.cat((atom_states, fake_states), dim=0),
+            is_real,
+        )
     
     def __getitem__(self, idx):
         node_start_idx = self.node_idx_array[idx, 0]
@@ -197,7 +295,19 @@ class MoleculeDataset(torch.utils.data.Dataset):
         if self.use_hydrogen_counts:
             atom_hydrogens = self.atom_hydrogens[node_start_idx:node_end_idx]
 
-        # remove COM from positions
+        if self.use_fake_atoms:
+            (
+                positions,
+                atom_types,
+                atom_charges,
+                atom_states,
+                is_real,
+            ) = self._augment_with_fake_atoms(
+                positions, atom_types, atom_charges, atom_states, idx
+            )
+
+        # Remove the COM after fake-node augmentation so the entire state is
+        # centered, matching the centered coordinate prior.
         positions = positions - positions.mean(dim=0, keepdim=True)
 
         # get data pertaining to edges for this molecule
@@ -279,6 +389,8 @@ class MoleculeDataset(torch.utils.data.Dataset):
             g.ndata['s_1_true'] = one_hot(
                 atom_states, num_classes=self.n_atom_states
             ).float()
+            if self.use_fake_atoms:
+                g.ndata['is_real_1_true'] = is_real
         else:
             g.ndata['a_1_true'] = atom_types
             g.ndata['c_1_true'] = atom_charges

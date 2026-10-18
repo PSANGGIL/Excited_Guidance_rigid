@@ -14,6 +14,37 @@ bond_type_to_idx = { bond_type:idx for idx, bond_type in enumerate(bond_type_map
 bond_type_to_idx[None] = 0
 
 
+def fake_atom_state_index(atom_state_vocab: List[dict] | None) -> int | None:
+    """Return the unique synthetic fake-state index, if the codec defines one."""
+    if atom_state_vocab is None:
+        return None
+    indices = [
+        idx for idx, state in enumerate(atom_state_vocab)
+        if bool(state.get('is_fake', False))
+    ]
+    if len(indices) > 1:
+        raise ValueError('atom_state_vocab contains more than one fake state')
+    return None if not indices else indices[0]
+
+
+def remove_fake_atoms_from_graph(
+    g: dgl.DGLGraph,
+    atom_state_vocab: List[dict] | None,
+) -> dgl.DGLGraph:
+    """Return the endpoint-induced real-atom subgraph with indices relabelled."""
+    fake_index = fake_atom_state_index(atom_state_vocab)
+    if fake_index is None:
+        return g
+    state_feature = 's_1' if 's_1' in g.ndata else 's_1_true'
+    if state_feature not in g.ndata:
+        raise ValueError('fake-state decoding requires s_1 or s_1_true')
+    state_indices = g.ndata[state_feature].argmax(dim=-1)
+    keep = state_indices != fake_index
+    if bool(keep.all()):
+        return g
+    return dgl.node_subgraph(g, keep, store_ids=False)
+
+
 class SampledMolecule:
 
     def __init__(self, g: dgl.DGLGraph, 
@@ -41,22 +72,25 @@ class SampledMolecule:
         if ctmc_mol and residual_mask_policy == "reject":
             atom_type_map.append('__MASK_ATOM__')
         
-        # save the graph
-        self.g = g
+        # Keep the full diffusion state for trajectories, but expose the
+        # molecule graph after fake-node removal to all chemistry metrics.
+        self.slot_graph = g
+        self.num_slots = g.num_nodes()
+        self.g = remove_fake_atoms_from_graph(g, self.atom_state_vocab)
 
         self.positions, self.atom_types, self.atom_charges, self.bond_types, self.bond_src_idxs, self.bond_dst_idxs = extract_moldata_from_graph(
-            g,
+            self.g,
             atom_type_map,
             exclude_charges=exclude_charges,
             ctmc_mol=self.ctmc_mol,
             atom_state_vocab=self.atom_state_vocab)
         self.atom_hydrogens = extract_hydrogen_counts_from_graph(
-            g, ctmc_mol=self.ctmc_mol,
+            self.g, ctmc_mol=self.ctmc_mol,
             atom_state_vocab=self.atom_state_vocab,
         )
 
         self.atom_type_map = atom_type_map
-        self.num_atoms = g.num_nodes()
+        self.num_atoms = self.g.num_nodes()
         self.num_atom_types = len(atom_type_map)
 
         # build rdkit molecule
@@ -153,14 +187,12 @@ class SampledMolecule:
     def process_traj_frames(self, traj_frames: Dict[str, torch.Tensor], ep_traj: bool = False):
         """Converts the trajectory frames to a list of rdkit molecules."""
         # convert the frames to a list of rdkit molecules
-        g_dummy = copy_graph(self.g)
+        g_dummy = copy_graph(self.slot_graph)
 
         if ep_traj:
             n_frames = traj_frames['x_1_pred'].shape[0]
-            x_final = traj_frames['x_1_pred'][-1]
         else:
             n_frames = traj_frames['x'].shape[0]
-            x_final = traj_frames['x'][-1] # has shape (n_atoms, 3)
 
         traj_mols = []
         for frame_idx in range(n_frames):
@@ -183,21 +215,29 @@ class SampledMolecule:
 
                 data_src[f'{feat}_1'] = traj_frames[traj_key][frame_idx].clone()
 
-            # extract mol data from graph
+            frame_graph = remove_fake_atoms_from_graph(
+                g_dummy, self.atom_state_vocab
+            )
+
+            # extract mol data from the current real-atom induced subgraph
             positions, atom_types, atom_charges, bond_types, bond_src_idxs, bond_dst_idxs = extract_moldata_from_graph(
-                g_dummy, 
+                frame_graph,
                 self.atom_type_map,
                 ctmc_mol=self.ctmc_mol,
                 atom_state_vocab=self.atom_state_vocab)
 
             atom_hydrogens = extract_hydrogen_counts_from_graph(
-                g_dummy, ctmc_mol=self.ctmc_mol,
+                frame_graph, ctmc_mol=self.ctmc_mol,
                 atom_state_vocab=self.atom_state_vocab,
             )
 
             # align positions to final frame
-            if self.align_traj:
-                positions = rigid_alignment(positions, x_final)
+            if (
+                self.align_traj
+                and positions.shape == self.positions.shape
+                and positions.shape[0] > 0
+            ):
+                positions = rigid_alignment(positions, self.positions)
 
             # build rdkit molecule
             mol = build_molecule(
@@ -215,8 +255,8 @@ class SampledMolecule:
 
         traj_mols = [mol for mol in traj_mols if mol is not None]
 
-        if len(traj_mols) < len(traj_frames):
-            print(f'WARNING: {len(traj_frames) - len(traj_mols)} frames were not converted to rdkit molecules')
+        if len(traj_mols) < n_frames:
+            print(f'WARNING: {n_frames - len(traj_mols)} frames were not converted to rdkit molecules')
 
         return traj_mols
     
@@ -228,6 +268,8 @@ def extract_moldata_from_graph(
     ctmc_mol: bool = False,
     atom_state_vocab: List[dict] | None = None,
 ):
+
+    g = remove_fake_atoms_from_graph(g, atom_state_vocab)
 
     # extract node-level features
     positions = g.ndata['x_1']
@@ -285,6 +327,7 @@ def extract_hydrogen_counts_from_graph(
     ctmc_mol: bool = False,
     atom_state_vocab: List[dict] | None = None,
 ):
+    g = remove_fake_atoms_from_graph(g, atom_state_vocab)
     # A residual CTMC mask is represented as -1 and rejected by build_molecule.
     if 's_1' in g.ndata:
         if atom_state_vocab is None:
@@ -311,6 +354,8 @@ def extract_hydrogen_counts_from_graph(
 
 def build_molecule(positions, atom_types, atom_charges, bond_src_idxs, bond_dst_idxs, bond_types, atom_hydrogens=None):
     """Builds a rdkit molecule from the given atom and bond information."""
+    if len(atom_types) == 0:
+        return None
     # Residual CTMC masks are invalid states, not selenium or a charge class.
     if any(atom_type == '__MASK_ATOM__' for atom_type in atom_types):
         return None

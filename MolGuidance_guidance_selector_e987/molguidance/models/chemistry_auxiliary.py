@@ -52,6 +52,7 @@ class JointChemistryAuxiliaryLoss(nn.Module):
         state_charges: torch.Tensor,
         state_valence_probabilities: torch.Tensor,
         state_support: torch.Tensor,
+        state_is_fake: torch.Tensor | None = None,
         eps: float = 1.0e-8,
     ):
         super().__init__()
@@ -60,6 +61,10 @@ class JointChemistryAuxiliaryLoss(nn.Module):
             state_valence_probabilities, dtype=torch.float32
         )
         state_support = torch.as_tensor(state_support, dtype=torch.bool)
+        if state_is_fake is None:
+            state_is_fake = torch.zeros_like(state_support)
+        else:
+            state_is_fake = torch.as_tensor(state_is_fake, dtype=torch.bool)
         if state_charges.ndim != 1:
             raise ValueError("state_charges must be one-dimensional")
         if valence_probabilities.ndim != 2:
@@ -68,6 +73,10 @@ class JointChemistryAuxiliaryLoss(nn.Module):
             raise ValueError("state charge and valence vocabularies disagree")
         if state_support.shape != state_charges.shape:
             raise ValueError("state_support must match the atom-state vocabulary")
+        if state_is_fake.shape != state_charges.shape:
+            raise ValueError("state_is_fake must match the atom-state vocabulary")
+        if int(state_is_fake.sum()) > 1:
+            raise ValueError("at most one synthetic fake atom state is supported")
         if not bool(state_support.any()):
             raise ValueError("at least one atom state must be train-supported")
         supported_rows = valence_probabilities[state_support]
@@ -90,6 +99,7 @@ class JointChemistryAuxiliaryLoss(nn.Module):
             persistent=False,
         )
         self.register_buffer("state_support", state_support, persistent=False)
+        self.register_buffer("state_is_fake", state_is_fake, persistent=False)
 
     def _effective_endpoint_probabilities(
         self,
@@ -259,7 +269,21 @@ class JointChemistryAuxiliaryLoss(nn.Module):
         true_charge_by_graph = node_logits.new_zeros(batch_size)
         predicted_charge_by_graph.index_add_(0, node_batch_idx, predicted_charge)
         true_charge_by_graph.index_add_(0, node_batch_idx, true_charge)
-        atom_counts = g.batch_num_nodes().to(node_logits).clamp_min(1.0)
+        target_state = g.ndata["s_1_true"].argmax(dim=-1)
+        target_is_real = ~self.state_is_fake[target_state]
+        if "is_real_1_true" in g.ndata:
+            labelled_is_real = g.ndata["is_real_1_true"].bool()
+            if labelled_is_real.shape != target_is_real.shape or not torch.equal(
+                labelled_is_real, target_is_real
+            ):
+                raise ValueError(
+                    "is_real_1_true disagrees with the joint fake-state target"
+                )
+        atom_counts = node_logits.new_zeros(batch_size)
+        atom_counts.index_add_(
+            0, node_batch_idx, target_is_real.to(node_logits.dtype)
+        )
+        atom_counts = atom_counts.clamp_min(1.0)
         charge_error = (
             predicted_charge_by_graph - true_charge_by_graph
         ).square() / atom_counts

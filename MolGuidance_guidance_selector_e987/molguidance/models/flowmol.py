@@ -66,6 +66,10 @@ class FlowMol(pl.LightningModule):
                  atom_count_conditioning: dict | None = None,
                  chemistry_auxiliary: dict | None = None,
                  self_conditioning_rate: float = 0.0,
+                 fake_atom_fraction: float = 0.0,
+                 fake_atom_std: float = 1.0,
+                 fake_atom_validation_seed: int = 17_041,
+                 fake_atom_capacity_mode: str = 'stochastic',
                  ):
         super().__init__()
 
@@ -118,6 +122,32 @@ class FlowMol(pl.LightningModule):
             or not 0.0 <= self.self_conditioning_rate <= 1.0
         ):
             raise ValueError("self_conditioning_rate must be finite and in [0, 1]")
+        self.fake_atom_fraction = float(fake_atom_fraction)
+        self.fake_atom_std = float(fake_atom_std)
+        self.fake_atom_validation_seed = int(fake_atom_validation_seed)
+        self.fake_atom_capacity_mode = str(fake_atom_capacity_mode)
+        if (
+            not torch.isfinite(torch.tensor(self.fake_atom_fraction))
+            or not 0.0 <= self.fake_atom_fraction <= 1.0
+        ):
+            raise ValueError('fake_atom_fraction must be finite and in [0, 1]')
+        if (
+            not torch.isfinite(torch.tensor(self.fake_atom_std))
+            or self.fake_atom_std <= 0.0
+        ):
+            raise ValueError('fake_atom_std must be finite and positive')
+        if self.fake_atom_validation_seed < 0:
+            raise ValueError('fake_atom_validation_seed must be non-negative')
+        if self.fake_atom_capacity_mode not in {'stochastic', 'maximum', 'none'}:
+            raise ValueError(
+                "fake_atom_capacity_mode must be 'stochastic', 'maximum', or 'none'"
+            )
+        self.use_fake_atoms = self.fake_atom_fraction > 0.0
+        self.fake_atom_state_index = None
+        if self.use_fake_atoms and not self.use_joint_atom_state:
+            raise ValueError('fake atoms require the joint atom-state representation')
+        if self.use_fake_atoms and parameterization != 'ctmc':
+            raise ValueError('fake atoms are currently supported only by CTMC')
 
         chemistry_defaults = {
             'edge_existence_weight': 0.0,
@@ -378,13 +408,41 @@ class FlowMol(pl.LightningModule):
             )
 
         metadata = json.loads(metadata_path.read_text())
-        states = metadata.get('states')
-        support = metadata.get('train_supported')
-        if not isinstance(states, list) or len(states) != self.n_atom_states:
+        raw_states = metadata.get('states')
+        raw_support = metadata.get('train_supported')
+        if not isinstance(raw_states, list) or not isinstance(raw_support, list):
+            raise ValueError('joint atom-state metadata is missing states/support')
+        states = [dict(state) for state in raw_states]
+        support = list(raw_support)
+        fake_indices = [
+            idx for idx, state in enumerate(states)
+            if isinstance(state, dict) and bool(state.get('is_fake', False))
+        ]
+        if self.use_fake_atoms:
+            if len(states) == self.n_atom_states - 1 and not fake_indices:
+                states.append({
+                    'symbol': '__FAKE__',
+                    'formal_charge': 0,
+                    'hydrogens': 0,
+                    'train_heavy_valence_counts': {'0': 1},
+                    'is_fake': True,
+                    'atom_type_index': None,
+                })
+                support.append(True)
+                fake_indices = [self.n_atom_states - 1]
+            elif (
+                len(states) != self.n_atom_states
+                or fake_indices != [self.n_atom_states - 1]
+            ):
+                raise ValueError(
+                    'fake-atom vocabulary must append exactly one final fake state'
+                )
+            self.fake_atom_state_index = self.n_atom_states - 1
+        elif len(states) != self.n_atom_states or fake_indices:
             raise ValueError(
                 'joint atom-state vocabulary length does not match n_atom_states'
             )
-        if not isinstance(support, list) or len(support) != self.n_atom_states:
+        if len(support) != self.n_atom_states:
             raise ValueError(
                 'joint atom-state train_supported mask has invalid length'
             )
@@ -392,7 +450,7 @@ class FlowMol(pl.LightningModule):
         for idx, state in enumerate(states):
             if not isinstance(state, dict) or not required_keys <= state.keys():
                 raise ValueError(f'invalid atom-state entry at index {idx}')
-            if state['symbol'] not in self.atom_type_map:
+            if not state.get('is_fake', False) and state['symbol'] not in self.atom_type_map:
                 raise ValueError(
                     f"atom-state symbol {state['symbol']!r} is absent from atom_type_map"
                 )
@@ -458,6 +516,10 @@ class FlowMol(pl.LightningModule):
             state_charges=charges,
             state_valence_probabilities=valence_probabilities,
             state_support=support,
+            state_is_fake=torch.tensor(
+                [bool(state.get('is_fake', False)) for state in self.atom_state_vocab],
+                dtype=torch.bool,
+            ),
         )
 
     def configure_prior(self):
@@ -471,6 +533,18 @@ class FlowMol(pl.LightningModule):
                 'train_data_joint_state_marginal.pt'
             )
             self.p_s = torch.load(state_marginal_file)
+            if self.use_fake_atoms and self.p_s.shape == (self.n_atom_states - 1,):
+                # The static processed DB contains only real states. Dynamic
+                # augmentation adds E[K] ~= pN/2 fake nodes, so retain a valid
+                # marginal for optional non-CTMC consumers without rewriting DB files.
+                fake_share = (0.5 * self.fake_atom_fraction) / (
+                    1.0 + 0.5 * self.fake_atom_fraction
+                )
+                real_marginal = self.p_s / self.p_s.sum().clamp_min(1.0e-12)
+                self.p_s = torch.cat((
+                    real_marginal * (1.0 - fake_share),
+                    real_marginal.new_tensor([fake_share]),
+                ))
             if self.p_s.shape != (self.n_atom_states,):
                 raise ValueError('joint atom-state marginal has invalid shape')
 
@@ -1139,6 +1213,7 @@ class FlowMol(pl.LightningModule):
                 raise ValueError(f'number_of_atoms must contain {n_molecules} entries')
             if (counts <= 0).any():
                 raise ValueError('number_of_atoms entries must be positive')
+            self.last_atom_count_diagnostics = {'mode': 'fixed'}
             return counts.to(device)
 
         targets = multiple_properties
@@ -1152,6 +1227,44 @@ class FlowMol(pl.LightningModule):
             nearest_k=atom_count_nearest_k,
             generator=atom_count_generator,
         ).to(device)
+
+    def add_fake_atom_capacity(
+        self,
+        real_atom_counts: torch.Tensor,
+        *,
+        mode: str | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """Convert sampled real counts into train-distribution-matched slot counts.
+
+        ``sample`` still interprets its input as the exact number of graph slots.
+        ``sample_random_sizes`` calls this helper so its real-count draw is
+        augmented by the same integer-uniform fake capacity used in training.
+        """
+        counts = torch.as_tensor(real_atom_counts, dtype=torch.long)
+        if counts.ndim != 1 or bool((counts <= 0).any()):
+            raise ValueError('real_atom_counts must be a positive 1-D tensor')
+        selected_mode = self.fake_atom_capacity_mode if mode is None else str(mode)
+        if selected_mode not in {'stochastic', 'maximum', 'none'}:
+            raise ValueError(
+                "fake atom capacity mode must be 'stochastic', 'maximum', or 'none'"
+            )
+        if not self.use_fake_atoms or selected_mode == 'none':
+            return counts.clone()
+
+        original_device = counts.device
+        counts_cpu = counts.detach().to('cpu')
+        max_fake = torch.ceil(
+            counts_cpu.to(torch.float64) * self.fake_atom_fraction
+        ).to(torch.long)
+        if selected_mode == 'maximum':
+            extras = max_fake
+        else:
+            uniform = torch.rand(
+                max_fake.shape, generator=generator, dtype=torch.float64
+            )
+            extras = torch.floor(uniform * (max_fake + 1)).to(torch.long)
+        return (counts_cpu + extras).to(original_device)
 
     def sample_random_sizes(self, n_molecules: int, device="cuda:0",
         stochasticity=None, high_confidence_threshold=None, 
@@ -1167,13 +1280,14 @@ class FlowMol(pl.LightningModule):
         atom_count_bandwidth: float | Sequence[float] | None = None,
         atom_count_nearest_k: int | None = None,
         atom_count_generator: torch.Generator | None = None,
+        fake_atom_capacity_mode: str | None = None,
         **kwargs):
         """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
 
         if multilple_values_to_one_property is not None and properties_for_sampling is not None:
             raise ValueError('You can not provide both multilple_values_to_one_property and properties_for_sampling, only one of them should be provided')
         
-        atoms_per_molecule = self.resolve_atom_counts(
+        real_atoms_per_molecule = self.resolve_atom_counts(
             n_molecules,
             device,
             number_of_atoms=number_of_atoms,
@@ -1184,6 +1298,15 @@ class FlowMol(pl.LightningModule):
             atom_count_nearest_k=atom_count_nearest_k,
             atom_count_generator=atom_count_generator,
         )
+        atoms_per_molecule = self.add_fake_atom_capacity(
+            real_atoms_per_molecule,
+            mode=fake_atom_capacity_mode,
+            generator=atom_count_generator,
+        )
+        self.last_atom_count_diagnostics.update({
+            'real_count_mean': float(real_atoms_per_molecule.float().mean()),
+            'slot_count_mean': float(atoms_per_molecule.float().mean()),
+        })
 
         if multilple_values_to_one_property is not None:
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \
@@ -1221,6 +1344,8 @@ class FlowMol(pl.LightningModule):
         """
         if n_timesteps is None:
             n_timesteps = self.default_n_timesteps
+        if properties_handle_method is None:
+            properties_handle_method = self.properties_handle_method
 
         if xt_traj or ep_traj:
             visualize = True

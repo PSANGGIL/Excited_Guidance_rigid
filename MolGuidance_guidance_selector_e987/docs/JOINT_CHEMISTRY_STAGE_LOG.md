@@ -485,3 +485,137 @@ Generation-quality claims require a fresh Stage-4
 training run and matched checkpoint evaluation. Fake atoms/count correction,
 independent graph/geometry times, and bond-first geometry updates remain
 separate later stages.
+
+
+## Stage 5: fake-atom count correction
+
+### Reference contract and local adaptation
+
+FlowMol3 treats molecular size as part of the generated endpoint by appending
+synthetic fake atoms during training and deleting nodes classified as fake
+after reverse integration. Its reported augmentation samples a fake count,
+anchors each fake node to a uniformly selected real atom, and adds isotropic
+Gaussian coordinate noise with standard deviation one.
+
+- FlowMol3 paper: <https://arxiv.org/abs/2508.12629>
+- Official implementation: <https://github.com/Dunni3/FlowMol>
+- Audited official commit: `77cae22174b7792b0e25e9e0414038420736d841`
+
+For a molecule with N real heavy atoms, Stage 5 samples
+
+`K ~ DiscreteUniform({0, ..., ceil(p_fake N)})`, with `p_fake = 0.3`,
+
+then samples anchors `a_k ~ Uniform({1,...,N})` and coordinates
+
+`x_fake,k = x_a_k + Normal(0, sigma_fake^2 I)`, with `sigma_fake = 1`.
+
+The inclusive upper endpoint follows the paper-level support and remains
+defined when the maximum is zero. Training uses worker-seeded randomness;
+validation and test use a deterministic seed derived from split and molecule
+index. All real and fake coordinates are centered together after augmentation.
+
+HP1KG uses a lossless joint `(element, formal charge, explicit H count)` state,
+so a separate element-only fake class would violate the codec. Stage 5 instead
+appends one 38th joint state:
+
+`(__FAKE__, charge=0, H=0, allowed heavy valence={0})`.
+
+The static 37-state metadata and processed tensors are not rewritten. The
+model appends the synthetic state in memory, marks it train-supported, and
+expands the otherwise-unused CTMC state marginal for schema consistency.
+
+### Edge, chemistry, and decoding semantics
+
+- The complete graph is built after fake nodes are appended. Every target edge
+  incident to a fake node is therefore `NONE`; connectivity and aromatic target
+  fields are zero on the same pairs.
+- The ordinary joint-state CE learns real versus fake identity. The existing
+  heavy-valence objective assigns fake state valence zero, coupling fake-node
+  probability to absence of incident bond order without adding a second,
+  potentially inconsistent edge head.
+- Molecular charge is still summed over all endpoint probabilities, but its
+  squared error is normalized by the target real-atom count, not by the padded
+  slot count. Dataset `is_real_1_true` is checked against the fake class rather
+  than trusted as an independent label.
+- Fake nodes remain in the graph throughout reverse CTMC/coordinate
+  integration. Immediately before RDKit construction, the endpoint-induced
+  real-node subgraph is taken. DGL relabels retained nodes and removes every
+  fake-incident edge. The full slot graph remains available as `slot_graph`,
+  while `g`, `num_atoms`, chemistry metrics, and RDKit see only decoded real
+  atoms. An all-fake endpoint is explicitly invalid.
+- Trajectory decoding repeats fake removal per frame. Rigid alignment is used
+  only when a frame and final endpoint have the same real-node count, avoiding
+  a shape error when node identity changes along the trajectory.
+
+### Sampling-size contract
+
+`sample(n_atoms)` continues to interpret `n_atoms` as exact graph slot counts.
+`sample_random_sizes`, used by production CFG/MG sampling, first draws the
+real-count proposal from the existing marginal or condition-aware kernel and
+then adds fake capacity using the same integer-uniform law as training. This
+preserves the joint training distribution over `(real count, slot count)`;
+the model is not given the latent real-count proposal as an extra condition.
+
+Three explicit capacity modes are available:
+
+- `stochastic` (default): train-distribution-matched integer-uniform capacity;
+- `maximum`: always add `ceil(p_fake N)` slots for diagnostic search capacity;
+- `none`: treat the proposal as the exact slot count.
+
+Base FlowMol, CFG, scale-aware MG, and auto-guidance random-size paths share
+this helper. Fixed count requests initialize the same count diagnostics as
+sampled counts. A separate API audit also made `properties_handle_method=None`
+fall back to the model's configured method in every sampler instead of reaching
+the vector field as an invalid mode.
+
+The complete graph scales quadratically. A 30% node increase can produce up to
+1.69 times as many pair states, so the isolated Stage-5 configuration starts at
+batch size 640 rather than Stage 4's 1024. It writes to a distinct output path:
+
+`configs/local/guidance_est/hp1kg_est_cfg_joint_kekule_stage5_fake_atoms.yaml`.
+
+### Checkpoint and stage isolation
+
+Stage 5 changes the categorical state width from 37 to 38. Consequently the
+node input embedding, node output head, and self-conditioning node-probability
+layers change shape. Stage-4 checkpoints are not strictly compatible and must
+not be presented as resumed Stage-5 training. The official XYZ coordinates,
+Stage-3 processed database, all earlier checkpoints, and background outputs are
+left untouched; Stage 5 requires a fresh run.
+
+### Verification (2026-10-18)
+
+- Ten focused fake-atom tests cover deterministic augmentation, inclusive
+  capacity bounds, fake-edge targets, metadata/marginal expansion, chemistry
+  oracle behavior, decoder relabelling, changing trajectory counts, all-fake
+  rejection, and schema guards.
+- The complete repository suite passes all 55 tests.
+- Full HP1KG oracle decoding passed RDKit identity 1581/1581: train 1264,
+  validation 158, and test 159. Fake nodes were actually present in 1398 of
+  those deterministic/stochastic audit samples; no failure was hidden by an
+  all-zero augmentation draw.
+- Stage 4 and Stage 5 have the same 642 state-dict keys and no added/removed
+  tensors. Exactly five tensors change shape: the conditional/unconditional
+  node input projections, node output weight/bias, and self-conditioning node
+  residual input. Parameter count rises only from 7,294,617 to 7,295,642
+  (+1,025); every coordinate, edge, and GVP tensor shape is unchanged.
+- On a real validation molecule augmented from 14 real atoms to 18 slots, the
+  decoder returned exactly 14 RDKit atoms. A production Stage-5 CFG
+  forward/backward with self-conditioning returned finite feature and chemistry
+  losses, finite total loss 10.61636, and finite gradients for every parameter
+  that received a gradient.
+- An untrained production Stage-5 CFG model completed a three-timepoint reverse
+  smoke through `sample_random_sizes`, emitted the expected 39-wide CTMC node
+  tensor (38 endpoint states plus mask) and five-wide edge tensor (four Kekule
+  states plus mask), and constructed a `SampledMolecule` without decoder error.
+- Changed Python files pass byte compilation and `git diff --check`.
+
+### Interpretation limit
+
+This stage proves a train/sample-consistent mechanism for deleting surplus
+slots and verifies that it is lossless on oracle endpoints. It does not prove
+that a freshly trained model will calibrate the number of fake predictions or
+improve chemical validity. Generated real-count histograms, all-fake rate,
+fake-bond probability, validity, condition fidelity, and coordinate quality
+must be measured from a new Stage-5 checkpoint before advancing to independent
+graph/geometry time or bond-first updates.
