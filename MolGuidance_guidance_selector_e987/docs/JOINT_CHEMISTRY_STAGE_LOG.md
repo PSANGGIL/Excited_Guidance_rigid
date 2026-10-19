@@ -683,7 +683,13 @@ diagnostic for MG.
 
 These checks establish code, gradient, and symmetry consistency; they do not
 show a generation-quality improvement. The production reverse sampler still
-uses the diagonal time path, and batch 512 is a conservative starting point
-rather than a measured maximum. Quality, condition fidelity, topology, and
+uses the diagonal time path. Quality, condition fidelity, topology, and
 diffusion-coordinate geometry must be evaluated from a freshly trained
 Stage-6 checkpoint.
+
+Before launch, full self-conditioned optimizer-step probes were run on the
+182631.6 MiB B200. Batch 512 used 93070 MiB reserved (51.0%) for 15341 nodes
+and 516166 directed edges. Batch 704 used 134704 MiB reserved (73.8%) and
+131263.9 MiB allocated (71.9%) for 21572 nodes and 749170 directed edges. Both
+steps were finite, including AdamW update. Batch 704 is therefore the measured
+Stage-6 default on this machine; it is not a portable default for smaller GPUs.

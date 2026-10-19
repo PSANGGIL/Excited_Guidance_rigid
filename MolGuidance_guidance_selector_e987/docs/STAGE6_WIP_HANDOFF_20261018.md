@@ -116,3 +116,7 @@ The pending verification sequence was completed.
 The former pending items 4 and 5 are therefore closed. Long training has not
 yet been started; the remaining next action is to commit the selected Stage-6
 files and launch a fresh run rather than loading a Stage-5 checkpoint.
+
+The initial Stage-6 commit is `af62e47`. Subsequent B200 optimizer-step probes
+measured 51.0% reserved memory at batch 512 and 73.8% at batch 704. The latter
+completed with finite loss and gradients and is now the configured batch size.

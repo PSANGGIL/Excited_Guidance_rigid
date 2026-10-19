@@ -103,10 +103,9 @@ mol_fm:
     s: 1.0
     e: 2.0
 training:
-  # The bond-first path retains edge activations through an additional
-  # coordinate gate. Start below Stage 5's 640 until measured GPU headroom is
-  # available; increase only after a real peak-memory probe.
-  batch_size: 512
+  # Measured on a B200 (182631.6 MiB usable): one full self-conditioned
+  # forward/backward/AdamW step reserved 134704 MiB (73.8%) at batch 704.
+  batch_size: 704
   evaluation:
     mols_to_sample: 32
     sample_interval: 1.0
