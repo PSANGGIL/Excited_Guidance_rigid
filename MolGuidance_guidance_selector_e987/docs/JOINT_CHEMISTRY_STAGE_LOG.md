@@ -619,3 +619,71 @@ improve chemical validity. Generated real-count histograms, all-fake rate,
 fake-bond probability, validity, condition fidelity, and coordinate quality
 must be measured from a new Stage-5 checkpoint before advancing to independent
 graph/geometry time or bond-first updates.
+
+## Stage 6: independent modality time and bond-first geometry (2026-10-19)
+
+Stage 6 keeps the Stage-5 joint atom-state/Kekule/fake-slot contract and adds
+two changes motivated by Megalodon/JODO and EGNN-style equivariant updates.
+
+- Coordinate corruption uses `t_x`; atom/bond CTMC corruption uses an
+  independently sampled `t_graph`.
+- Half of training examples, by default, set `t_graph=1` while retaining a
+  sampled `t_x`, exposing clean topology with noisy geometry. The remaining
+  examples use independently sampled modality times.
+- Explicit one-time calls retain the diagonal `t_x=t_graph` path so the
+  existing reverse sampler has a well-defined backward-compatible trajectory.
+- The vector field receives both times, and feature derivatives/loss weights
+  are evaluated at the time belonging to each modality.
+- A refreshed symmetric edge representation now drives an antisymmetric
+  distance-direction coordinate residual before the existing GVP coordinate
+  update. Pair normalization, opposite endpoint updates, and invariant scalar
+  gates preserve translation invariance, O(3) equivariance, and center of mass.
+- The new residual output layer is zero-initialized. It is an exact identity at
+  initialization but receives a nonzero gradient and becomes active after one
+  optimizer step.
+
+The released `convs_per_update=1` schedule skipped convolution zero. Stage 6
+fixes this only when the new bond-first route is enabled; the legacy route and
+legacy state-dict contract are unchanged.
+
+During the final call-path audit, Model Guidance was found to bypass the common
+deterministic validation grid and to retain condition dropout in its validation
+forward. It now uses the shared fixed `(t_x,t_graph)` grid through an explicit
+validation hook with `is_training=False`, condition dropout disabled, and
+self-conditioning enabled. This also restores the shared condition-shuffle
+diagnostic for MG.
+
+### Stage-6 verification
+
+- Changed Python files compile successfully and `git diff --check` passes.
+- Full unit-test discovery passes **68/68**. New coverage includes independent
+  time sampling, clean-graph/noisy-coordinate corruption, modality-specific
+  scheduler columns, schema guards, MG validation-mode dispatch, rotation,
+  reflection, translation, center-of-mass conservation, edge dependence,
+  gradient flow, and zero-init activation after an optimizer step.
+- Real HP1KG two-graph CUDA forward/backward smoke tests passed:
+  - CFG: 43 nodes, 922 directed edges, total loss 7.812815,
+    gradient norm 69.2387, bond-first gradient L1 20.8630, peak 215.79 MiB.
+  - scale-aware MG with the teacher branch enabled: 50 nodes, 1208 directed
+    edges, total loss 8.645580, gradient norm 85.3183, bond-first gradient L1
+    18.5703, peak 312.01 MiB.
+  - All reported feature/chemistry losses and gradients were finite.
+- Real HP1KG MG deterministic validation over the five configured off-diagonal
+  time pairs returned finite losses and diagnostics. Repeating the complete
+  grid and condition-shuffle pass differed by at most `3.8147e-6`, below the
+  `1e-5` CUDA/DGL numerical tolerance. The recorded time means were
+  `t_x=0.5`, `t_graph=0.65000004`; condition-shuffle gain was `0.1933813` for
+  this untrained smoke model.
+- Stage 5 has 642 state-dict keys and Stage 6 has 674. All 642 old keys remain,
+  but the two node input projections change from width 40 to 41 and 32
+  bond-update tensors are new. A fresh Stage-6 run is required; strict Stage-5
+  checkpoint resume is intentionally unsupported.
+
+### Remaining interpretation limit
+
+These checks establish code, gradient, and symmetry consistency; they do not
+show a generation-quality improvement. The production reverse sampler still
+uses the diagonal time path, and batch 512 is a conservative starting point
+rather than a measured maximum. Quality, condition fidelity, topology, and
+diffusion-coordinate geometry must be evaluated from a freshly trained
+Stage-6 checkpoint.

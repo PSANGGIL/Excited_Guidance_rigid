@@ -38,6 +38,9 @@ class EndpointVectorField(nn.Module):
                     continuous_inv_temp_schedule = None,
                     continuous_inv_temp_max: float = 10.0,
                     self_conditioning: bool = False,
+                    independent_modality_time: bool = False,
+                    bond_first_geometry: bool = False,
+                    bond_coordinate_scale: float = 0.1,
                     has_mask: bool = False # if we are using CTMC, input categorical features will have mask tokens,
                     # this means their one-hot representations will have an extra dimension,
                     # and the neural network instantiated by this method need to account for this
@@ -78,6 +81,14 @@ class EndpointVectorField(nn.Module):
         self.rbf_dmax = rbf_dmax
         self.rbf_dim = rbf_dim
         self.self_conditioning = bool(self_conditioning)
+        self.independent_modality_time = bool(independent_modality_time)
+        self.bond_first_geometry = bool(bond_first_geometry)
+        self.bond_coordinate_scale = float(bond_coordinate_scale)
+        if (
+            not torch.isfinite(torch.tensor(self.bond_coordinate_scale))
+            or self.bond_coordinate_scale <= 0.0
+        ):
+            raise ValueError('bond_coordinate_scale must be finite and positive')
 
         assert n_vec_channels >= 3, 'n_vec_channels must be >= 3'
 
@@ -131,6 +142,7 @@ class EndpointVectorField(nn.Module):
         node_input_dim = (
             node_category_dim
             + 1
+            + int(self.independent_modality_time)
             + len(self.node_categorical_feats) * n_mask_feats
         )
         self.node_input_dim = node_input_dim
@@ -183,6 +195,7 @@ class EndpointVectorField(nn.Module):
         # create molecule update layers
         self.node_position_updaters = nn.ModuleList([])
         self.edge_updaters = nn.ModuleList([])
+        self.bond_coordinate_updaters = nn.ModuleList([])
         if self.separate_mol_updaters:
             n_updaters = n_molecule_updates
         else:
@@ -190,6 +203,15 @@ class EndpointVectorField(nn.Module):
         for _ in range(n_updaters):
             self.node_position_updaters.append(NodePositionUpdate(n_hidden_scalars, n_vec_channels, n_gvps=3, n_cp_feats=n_cp_feats))
             self.edge_updaters.append(EdgeUpdate(n_hidden_scalars, n_hidden_edge_feats, update_edge_w_distance=update_edge_w_distance, rbf_dim=rbf_dim))
+            if self.bond_first_geometry:
+                self.bond_coordinate_updaters.append(
+                    BondFirstCoordinateUpdate(
+                        n_node_scalars=n_hidden_scalars,
+                        n_edge_feats=n_hidden_edge_feats,
+                        rbf_dim=rbf_dim,
+                        coordinate_scale=self.bond_coordinate_scale,
+                    )
+                )
 
 
         self.node_output_head = nn.Sequential(
@@ -212,14 +234,93 @@ class EndpointVectorField(nn.Module):
         g: dgl.DGLGraph,
         time_tensor: torch.Tensor,
         node_batch_idx: torch.Tensor,
+        graph_time_tensor: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Concatenate noisy node states and time in one canonical order."""
+        """Concatenate noisy node states and modality times canonically.
+
+        Legacy fields consume only the coordinate time.  Stage-6 fields also
+        consume a separate graph time so the endpoint is identifiable when
+        coordinates and categorical graph variables are corrupted at different
+        points along their paths.
+        """
         features = [g.ndata[f'{self.node_categorical_feats[0]}_t']]
         features.append(time_tensor[node_batch_idx].unsqueeze(-1))
+        if self.independent_modality_time:
+            if graph_time_tensor is None:
+                graph_time_tensor = time_tensor
+            if graph_time_tensor.shape != time_tensor.shape:
+                raise ValueError(
+                    'graph_time_tensor must have the same shape as time_tensor'
+                )
+            features.append(graph_time_tensor[node_batch_idx].unsqueeze(-1))
         features.extend(
             g.ndata[f'{feat}_t'] for feat in self.node_categorical_feats[1:]
         )
         return torch.cat(features, dim=-1)
+
+    def update_molecule_state(
+        self,
+        g: dgl.DGLGraph,
+        node_scalar_features: torch.Tensor,
+        node_vec_features: torch.Tensor,
+        edge_features: torch.Tensor,
+        node_positions: torch.Tensor,
+        d: torch.Tensor,
+        upper_edge_mask: torch.Tensor,
+        updater_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply one topology/geometry update under an explicit causal order.
+
+        The legacy route is deliberately unchanged.  In the Stage-6 route the
+        invariant edge state is refreshed first, an antisymmetric pair update
+        lets that refreshed topology move coordinates, and only then does the
+        existing GVP coordinate head add its residual.  Distances are recomputed
+        once from the final coordinates returned by the block.
+        """
+        if self.bond_first_geometry:
+            edge_features = self.edge_updaters[updater_idx](
+                g, node_scalar_features, edge_features, d=d
+            )
+            node_positions = self.bond_coordinate_updaters[updater_idx](
+                g,
+                node_scalar_features,
+                edge_features,
+                node_positions,
+                d,
+                upper_edge_mask,
+            )
+            node_positions = self.node_position_updaters[updater_idx](
+                node_scalar_features, node_positions, node_vec_features
+            )
+        else:
+            node_positions = self.node_position_updaters[updater_idx](
+                node_scalar_features, node_positions, node_vec_features
+            )
+            x_diff, d = self.precompute_distances(g, node_positions)
+            edge_features = self.edge_updaters[updater_idx](
+                g, node_scalar_features, edge_features, d=d
+            )
+            return node_positions, edge_features, x_diff, d
+
+        x_diff, d = self.precompute_distances(g, node_positions)
+        return node_positions, edge_features, x_diff, d
+
+    def molecule_update_index(self, conv_idx: int) -> int | None:
+        """Return the updater index or ``None`` when no update is due.
+
+        The released implementation skipped convolution zero.  That is kept for
+        legacy checkpoints.  Bond-first Stage-6 fixes the off-by-one so
+        ``convs_per_update=1`` really performs one molecule update per block.
+        """
+        if (conv_idx + 1) % self.convs_per_update != 0:
+            return None
+        if not self.bond_first_geometry and conv_idx == 0:
+            return None
+        if self.separate_mol_updaters:
+            if self.bond_first_geometry:
+                return (conv_idx + 1) // self.convs_per_update - 1
+            return conv_idx // self.convs_per_update
+        return 0
 
     def split_node_output(
         self,
@@ -359,14 +460,15 @@ class EndpointVectorField(nn.Module):
 
     def forward(self, g: dgl.DGLGraph, t: torch.Tensor, 
                  node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, apply_softmax=False, remove_com=False,
-                 previous_endpoint: dict[str, torch.Tensor] | None = None):
+                 previous_endpoint: dict[str, torch.Tensor] | None = None,
+                 graph_time: torch.Tensor | None = None):
         """Predict x_1 (trajectory destination) given x_t"""
         device = g.device
 
         with g.local_scope():
             # gather node and edge features for input to convolutions
             node_scalar_features = self.build_node_scalar_inputs(
-                g, t, node_batch_idx
+                g, t, node_batch_idx, graph_time_tensor=graph_time
             )
             node_scalar_features = self.scalar_embedding(node_scalar_features)
 
@@ -407,18 +509,20 @@ class EndpointVectorField(nn.Module):
                     )
 
                     # every convs_per_update convolutions, update the node positions and edge features
-                    if conv_idx != 0 and (conv_idx + 1) % self.convs_per_update == 0:
-
-                        if self.separate_mol_updaters:
-                            updater_idx = conv_idx // self.convs_per_update
-                        else:
-                            updater_idx = 0
-
-                        node_positions = self.node_position_updaters[updater_idx](node_scalar_features, node_positions, node_vec_features)
-
-                        x_diff, d = self.precompute_distances(g, node_positions)
-
-                        edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
+                    updater_idx = self.molecule_update_index(conv_idx)
+                    if updater_idx is not None:
+                        node_positions, edge_features, x_diff, d = (
+                            self.update_molecule_state(
+                                g,
+                                node_scalar_features,
+                                node_vec_features,
+                                edge_features,
+                                node_positions,
+                                d,
+                                upper_edge_mask,
+                                updater_idx,
+                            )
+                        )
 
             
             # predict final categorical node states
@@ -930,7 +1034,96 @@ class NodePositionUpdate(nn.Module):
     def forward(self, scalars: torch.Tensor, positions: torch.Tensor, vectors: torch.Tensor):
         _, vector_updates = self.gvps((scalars, vectors))
         return positions + vector_updates.squeeze(1)
-    
+
+
+class BondFirstCoordinateUpdate(nn.Module):
+    """Move coordinates with a refreshed, invariant pair representation.
+
+    For every undirected pair ``{i,j}``, a scalar gate is predicted from a
+    symmetric function of the two node states, the two directed edge states,
+    and distance RBFs.  The resulting displacement is added as ``+delta`` to
+    one endpoint and ``-delta`` to the other.  Consequently the layer is
+    translation invariant, O(3)-equivariant, and conserves each graph's center
+    of mass exactly (up to floating-point summation).
+    """
+
+    def __init__(
+        self,
+        n_node_scalars: int,
+        n_edge_feats: int,
+        rbf_dim: int,
+        coordinate_scale: float = 0.1,
+    ):
+        super().__init__()
+        self.coordinate_scale = float(coordinate_scale)
+        input_dim = 2 * n_node_scalars + n_edge_feats + rbf_dim
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, n_edge_feats),
+            nn.SiLU(),
+            nn.Linear(n_edge_feats, 1),
+        )
+        # Start from the proven legacy geometry route.  The new causal path is
+        # live (and receives gradients) but cannot destabilize the first step.
+        nn.init.zeros_(self.gate[-1].weight)
+        nn.init.zeros_(self.gate[-1].bias)
+
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        node_scalars: torch.Tensor,
+        edge_feats: torch.Tensor,
+        positions: torch.Tensor,
+        distance_rbf: torch.Tensor,
+        upper_edge_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if upper_edge_mask.dtype != torch.bool:
+            raise TypeError('upper_edge_mask must be boolean')
+        if int(upper_edge_mask.sum()) * 2 != g.num_edges():
+            raise ValueError(
+                'bond-first update requires one aligned reverse edge per upper edge'
+            )
+
+        src, dst = g.edges()
+        pair_src = src[upper_edge_mask]
+        pair_dst = dst[upper_edge_mask]
+        upper_edge = edge_feats[upper_edge_mask]
+        lower_edge = edge_feats[~upper_edge_mask]
+        upper_distance = distance_rbf[upper_edge_mask]
+        lower_distance = distance_rbf[~upper_edge_mask]
+        if upper_edge.shape != lower_edge.shape:
+            raise ValueError('directed edge halves are not aligned')
+
+        pair_inputs = torch.cat(
+            (
+                node_scalars[pair_src] + node_scalars[pair_dst],
+                (node_scalars[pair_src] - node_scalars[pair_dst]).abs(),
+                0.5 * (upper_edge + lower_edge),
+                0.5 * (upper_distance + lower_distance),
+            ),
+            dim=-1,
+        )
+        gate = torch.tanh(self.gate(pair_inputs)) * self.coordinate_scale
+
+        relative = positions[pair_src] - positions[pair_dst]
+        unit_relative = relative / torch.linalg.vector_norm(
+            relative, dim=-1, keepdim=True
+        ).clamp_min(1.0e-8)
+
+        degree = positions.new_zeros(positions.shape[0])
+        ones = positions.new_ones(pair_src.shape[0])
+        degree.index_add_(0, pair_src, ones)
+        degree.index_add_(0, pair_dst, ones)
+        pair_normalizer = (
+            degree[pair_src].clamp_min(1.0)
+            * degree[pair_dst].clamp_min(1.0)
+        ).sqrt().unsqueeze(-1)
+        pair_update = gate * unit_relative / pair_normalizer
+
+        displacement = torch.zeros_like(positions)
+        displacement.index_add_(0, pair_src, pair_update)
+        displacement.index_add_(0, pair_dst, -pair_update)
+        return positions + displacement
+
 class EdgeUpdate(nn.Module):
 
     def __init__(self, n_node_scalars, n_edge_feats, update_edge_w_distance=False, rbf_dim=16):

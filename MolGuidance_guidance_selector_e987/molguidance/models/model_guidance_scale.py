@@ -66,7 +66,10 @@ class ModelGuidance(FlowMol):
         self.mg_start_step = mg_start_step
         self.use_scale_aware = use_scale_aware
 
-        vector_field_config = kwargs.get("vector_field_config", {})
+        vector_field_config = dict(kwargs.get("vector_field_config", {}))
+        vector_field_config['independent_modality_time'] = (
+            self.independent_modality_time
+        )
 
         # Create unconditional embedder (zero embedding)
         self.unconditional_embedder = ZerosEmbedding(hidden_dim=self.property_embedding_dim)
@@ -143,31 +146,34 @@ class ModelGuidance(FlowMol):
         self.update_ema(self.ema_vector_field, self.vector_field, decay=ema_decay)
 
     def validation_step(self, g: dgl.DGLGraph, batch_idx: int):
-        # compute losses
-        losses = self(g, is_training=False)
+        return super().validation_step(g, batch_idx)
 
-        # create dictionary of values to log
-        val_log_dict = {
-            'epoch_exact': self.last_epoch_exact
-        }
-
-        for key in losses:
-            val_log_dict[f'{key}_val_loss'] = losses[key]
-
-        self.log_dict(val_log_dict, batch_size=g.batch_size, sync_dist=True)
-
-        # combine individual losses into a total loss
-        total_loss = self._total_from_feature_losses(losses)
-
-        self.log('val_total_loss', total_loss, prog_bar=True, batch_size=g.batch_size, on_step=True, sync_dist=True)
-
-        return total_loss
+    def _validation_forward(
+        self,
+        g: dgl.DGLGraph,
+        *,
+        t: torch.Tensor,
+        graph_time: torch.Tensor,
+        corruption_generator: torch.Generator,
+    ):
+        return self(
+            g,
+            is_training=False,
+            t=t,
+            graph_time=graph_time,
+            corruption_generator=corruption_generator,
+            condition_dropout=False,
+            self_conditioning=True,
+        )
 
     def forward(
         self,
         g: dgl.DGLGraph,
         is_training=True,
+        t: torch.Tensor | None = None,
+        graph_time: torch.Tensor | None = None,
         corruption_generator: torch.Generator | None = None,
+        condition_dropout: bool | None = None,
         self_conditioning: bool | None = None,
     ):
         """
@@ -178,7 +184,10 @@ class ModelGuidance(FlowMol):
         device = g.device
         
         round = lambda x: int(np.ceil(x)) if (random.random() < x - int(np.floor(x))) else int(np.floor(x))
-        num_mg, num_drop = 0, round(batch_size * self.drop_ratio)
+        if condition_dropout is None:
+            condition_dropout = bool(is_training)
+        num_mg = 0
+        num_drop = round(batch_size * self.drop_ratio) if condition_dropout else 0
 
         use_mg_loss =  is_training and self.mg_start_step >= 0 and self.global_step >= self.mg_start_step
         if use_mg_loss:
@@ -201,10 +210,13 @@ class ModelGuidance(FlowMol):
         # Create a mask which selects all of the upper triangle edges from the batched graph
         upper_edge_mask = get_upper_edge_mask(g)
 
-        # Sample timepoints for each molecule in the batch
-        t = torch.rand(
-            batch_size, device=device, generator=corruption_generator
-        ).float()
+        t, graph_time = self.resolve_modality_times(
+            batch_size=batch_size,
+            device=device,
+            coordinate_time=t,
+            graph_time=graph_time,
+            generator=corruption_generator,
+        )
 
         # Make sure prop has correct shape for the property embedder
         g.prop = g.prop.unsqueeze(-1) if g.prop.dim() == 1 else g.prop
@@ -222,6 +234,7 @@ class ModelGuidance(FlowMol):
             edge_batch_idx,
             upper_edge_mask,
             generator=corruption_generator,
+            graph_time=graph_time,
         )
 
         emb_mix = torch.cat([self.property_embedder(g.prop[:num_mg]),
@@ -241,6 +254,7 @@ class ModelGuidance(FlowMol):
             upper_edge_mask,
             corruption_generator=corruption_generator,
             self_conditioning=self_conditioning,
+            graph_time=graph_time,
             **student_kwargs,
         )
         
@@ -264,6 +278,7 @@ class ModelGuidance(FlowMol):
 
                 # Time tensor for conditional batch
                 t_cond = t[:num_mg]
+                graph_time_cond = graph_time[:num_mg]
                 t_cond_combined = torch.cat([t_cond.unsqueeze(-1), cond_prop_emb], dim=-1).to(device)
                 t_uncond_combined = torch.cat([t_cond.unsqueeze(-1), uncond_prop_emb], dim=-1).to(device)
 
@@ -281,6 +296,7 @@ class ModelGuidance(FlowMol):
                     cond_upper_edge_mask,
                     self_conditioning=True,
                     vector_field=self.ema_vector_field,
+                    graph_time=graph_time_cond,
                     **conditional_teacher_kwargs,
                 )
                 vf_output_uncond = self.predict_endpoint(
@@ -290,6 +306,7 @@ class ModelGuidance(FlowMol):
                     cond_upper_edge_mask,
                     self_conditioning=True,
                     vector_field=self.ema_vector_field,
+                    graph_time=graph_time_cond,
                     **unconditional_teacher_kwargs,
                 )
 
@@ -382,7 +399,9 @@ class ModelGuidance(FlowMol):
 
         # get the time-dependent loss weights if necessary
         if self.time_scaled_loss:
-            time_weights = self.interpolant_scheduler.loss_weights(t)
+            time_weights = self.modality_schedule_values(
+                'loss_weights', t, graph_time
+            )
 
         # compute losses
         losses = {}
@@ -410,7 +429,7 @@ class ModelGuidance(FlowMol):
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(
-                g, vf_output, upper_edge_mask, t
+                g, vf_output, upper_edge_mask, graph_time
             )
         )
         return losses
@@ -616,7 +635,8 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, 
                 guidance_scale: float|torch.Tensor=None,
                 apply_softmax=False, remove_com=False,
-                previous_endpoint: dict[str, torch.Tensor] | None = None):
+                previous_endpoint: dict[str, torch.Tensor] | None = None,
+                graph_time: torch.Tensor | None = None):
         """
         Forward pass with integrated guidance scale.
         """
@@ -628,6 +648,17 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             
             # Get time tensor
             time_tensor = t[:, 0] if len(t.shape) > 1 else t
+            if graph_time is None:
+                graph_time = time_tensor
+            graph_time = torch.as_tensor(
+                graph_time, device=device, dtype=time_tensor.dtype
+            )
+            if graph_time.ndim == 0:
+                graph_time = graph_time.expand(g.batch_size)
+            if graph_time.shape != time_tensor.shape:
+                raise ValueError(
+                    'graph_time must match the graph-level coordinate time shape'
+                )
             
             # Process scale if provided
             if guidance_scale is not None:
@@ -648,7 +679,10 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             scale_emb = scale_embedding[node_batch_idx]
             
             base_features = self.build_node_scalar_inputs(
-                g, time_tensor, node_batch_idx
+                g,
+                time_tensor,
+                node_batch_idx,
+                graph_time_tensor=graph_time,
             )
             node_scalar_features = self.scalar_embedding_uncond(base_features)
 
@@ -764,18 +798,20 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                     )
 
                     # every convs_per_update convolutions, update the node positions and edge features
-                    if conv_idx != 0 and (conv_idx + 1) % self.convs_per_update == 0:
-
-                        if self.separate_mol_updaters:
-                            updater_idx = conv_idx // self.convs_per_update
-                        else:
-                            updater_idx = 0
-
-                        node_positions = self.node_position_updaters[updater_idx](node_scalar_features, node_positions, node_vec_features)
-
-                        x_diff, d = self.precompute_distances(g, node_positions)
-
-                        edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
+                    updater_idx = self.molecule_update_index(conv_idx)
+                    if updater_idx is not None:
+                        node_positions, edge_features, x_diff, d = (
+                            self.update_molecule_state(
+                                g,
+                                node_scalar_features,
+                                node_vec_features,
+                                edge_features,
+                                node_positions,
+                                d,
+                                upper_edge_mask,
+                                updater_idx,
+                            )
+                        )
 
             
             # Use the base field's dynamic chemistry contract: either legacy

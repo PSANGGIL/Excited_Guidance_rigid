@@ -70,6 +70,7 @@ class FlowMol(pl.LightningModule):
                  fake_atom_std: float = 1.0,
                  fake_atom_validation_seed: int = 17_041,
                  fake_atom_capacity_mode: str = 'stochastic',
+                 modality_time: dict | None = None,
                  ):
         super().__init__()
 
@@ -149,6 +150,36 @@ class FlowMol(pl.LightningModule):
         if self.use_fake_atoms and parameterization != 'ctmc':
             raise ValueError('fake atoms are currently supported only by CTMC')
 
+        modality_time_defaults = {
+            'enabled': False,
+            'graph_clean_probability': 0.5,
+        }
+        modality_time_config = dict(modality_time or {})
+        unknown_modality_time_keys = (
+            set(modality_time_config) - set(modality_time_defaults)
+        )
+        if unknown_modality_time_keys:
+            raise ValueError(
+                'unknown modality_time options: '
+                + ', '.join(sorted(unknown_modality_time_keys))
+            )
+        modality_time_defaults.update(modality_time_config)
+        self.independent_modality_time = bool(
+            modality_time_defaults['enabled']
+        )
+        self.graph_clean_probability = float(
+            modality_time_defaults['graph_clean_probability']
+        )
+        if (
+            not torch.isfinite(torch.tensor(self.graph_clean_probability))
+            or not 0.0 <= self.graph_clean_probability <= 1.0
+        ):
+            raise ValueError('graph_clean_probability must be finite and in [0, 1]')
+        if self.independent_modality_time and parameterization != 'ctmc':
+            raise NotImplementedError(
+                'independent modality time is currently supported only for CTMC'
+            )
+
         chemistry_defaults = {
             'edge_existence_weight': 0.0,
             'valence_weight': 0.0,
@@ -194,6 +225,7 @@ class FlowMol(pl.LightningModule):
 
         validation_defaults = {
             'time_grid': [0.05, 0.25, 0.5, 0.75, 0.95],
+            'graph_time_grid': None,
             'seed': 17_041,
             'condition_shuffle': True,
         }
@@ -205,6 +237,23 @@ class FlowMol(pl.LightningModule):
             raise ValueError('validation time_grid must contain at least one value')
         if any(not 0.0 < value < 1.0 for value in self.validation_time_grid):
             raise ValueError('validation time_grid values must be strictly between 0 and 1')
+        raw_graph_time_grid = validation_defaults['graph_time_grid']
+        if raw_graph_time_grid is None:
+            raw_graph_time_grid = self.validation_time_grid
+        self.validation_graph_time_grid = tuple(
+            float(value) for value in raw_graph_time_grid
+        )
+        if len(self.validation_graph_time_grid) != len(self.validation_time_grid):
+            raise ValueError(
+                'validation graph_time_grid must match time_grid length'
+            )
+        if any(
+            not 0.0 < value <= 1.0
+            for value in self.validation_graph_time_grid
+        ):
+            raise ValueError(
+                'validation graph_time_grid values must be in (0, 1]'
+            )
         self.validation_seed = int(validation_defaults['seed'])
         self.validation_condition_shuffle = bool(
             validation_defaults['condition_shuffle']
@@ -311,6 +360,18 @@ class FlowMol(pl.LightningModule):
         # create interpolant scheduler and vector field
         self.interpolant_scheduler = InterpolantScheduler(canonical_feat_order=self.canonical_feat_order, 
                                                           **interpolant_scheduler_config)
+        vector_field_config = dict(vector_field_config)
+        configured_independent_time = vector_field_config.get(
+            'independent_modality_time', self.independent_modality_time
+        )
+        if bool(configured_independent_time) != self.independent_modality_time:
+            raise ValueError(
+                'mol_fm.modality_time.enabled and '
+                'vector_field.independent_modality_time disagree'
+            )
+        vector_field_config['independent_modality_time'] = (
+            self.independent_modality_time
+        )
         
         # check that a valid parameterization was specified
         if self.parameterization not in ['endpoint', 'vector-field', 'dirichlet', 'ctmc']:
@@ -673,6 +734,110 @@ class FlowMol(pl.LightningModule):
         generator.manual_seed(int(seed))
         return generator
 
+    @staticmethod
+    def _coerce_graph_time(
+        value: torch.Tensor | float,
+        *,
+        batch_size: int,
+        device: torch.device,
+        name: str,
+    ) -> torch.Tensor:
+        value = torch.as_tensor(value, device=device, dtype=torch.float32)
+        if value.ndim == 0:
+            value = value.expand(batch_size)
+        if value.shape != (batch_size,):
+            raise ValueError(
+                f'{name} must have shape ({batch_size},), got {tuple(value.shape)}'
+            )
+        if not torch.isfinite(value).all() or bool(
+            ((value < 0.0) | (value > 1.0)).any()
+        ):
+            raise ValueError(f'{name} must contain finite values in [0, 1]')
+        return value
+
+    def resolve_modality_times(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+        coordinate_time: torch.Tensor | float | None,
+        graph_time: torch.Tensor | float | None,
+        generator: torch.Generator | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve training/validation times under one explicit contract.
+
+        With no explicit times, Stage 6 samples coordinate and graph times
+        independently.  A Bernoulli branch replaces graph time by one, exposing
+        noisy geometry together with the clean molecular graph as in Megalodon.
+        Supplying only coordinate time intentionally requests the diagonal path;
+        this keeps ordinary reverse integration and legacy callers deterministic.
+        """
+        coordinate_was_explicit = coordinate_time is not None
+        if coordinate_time is None:
+            coordinate_time = torch.rand(
+                batch_size, device=device, generator=generator
+            )
+        coordinate_time = self._coerce_graph_time(
+            coordinate_time,
+            batch_size=batch_size,
+            device=device,
+            name='coordinate_time',
+        )
+
+        if not self.independent_modality_time:
+            if graph_time is not None:
+                requested = self._coerce_graph_time(
+                    graph_time,
+                    batch_size=batch_size,
+                    device=device,
+                    name='graph_time',
+                )
+                if not torch.equal(requested, coordinate_time):
+                    raise ValueError(
+                        'graph_time may differ from coordinate_time only when '
+                        'independent modality time is enabled'
+                    )
+            return coordinate_time, coordinate_time
+
+        if graph_time is not None:
+            return coordinate_time, self._coerce_graph_time(
+                graph_time,
+                batch_size=batch_size,
+                device=device,
+                name='graph_time',
+            )
+        if coordinate_was_explicit:
+            return coordinate_time, coordinate_time
+
+        graph_time = torch.rand(
+            batch_size, device=device, generator=generator
+        )
+        if self.graph_clean_probability > 0.0:
+            clean_graph = torch.rand(
+                batch_size, device=device, generator=generator
+            ) < self.graph_clean_probability
+            graph_time = torch.where(
+                clean_graph, torch.ones_like(graph_time), graph_time
+            )
+        return coordinate_time, graph_time
+
+    def modality_schedule_values(
+        self,
+        method_name: str,
+        coordinate_time: torch.Tensor,
+        graph_time: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compose scheduler columns evaluated at their own modality time."""
+        schedule_method = getattr(self.interpolant_scheduler, method_name)
+        coordinate_values = schedule_method(coordinate_time)
+        if not self.independent_modality_time:
+            return coordinate_values
+        graph_values = schedule_method(graph_time)
+        result = graph_values.clone()
+        x_idx = self.canonical_feat_order.index('x')
+        result[:, x_idx] = coordinate_values[:, x_idx]
+        return result
+
     def _total_from_feature_losses(self, losses: Dict[str, torch.Tensor]):
         total = torch.zeros((), device=next(iter(losses.values())).device)
         for feat in self.canonical_feat_order:
@@ -690,7 +855,7 @@ class FlowMol(pl.LightningModule):
         g: dgl.DGLGraph,
         vf_output: Dict[str, torch.Tensor],
         upper_edge_mask: torch.Tensor,
-        t: torch.Tensor,
+        graph_time: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         if not self.chemistry_auxiliary_enabled:
             return {}
@@ -698,7 +863,7 @@ class FlowMol(pl.LightningModule):
             raise RuntimeError('chemistry auxiliary module is not configured')
         graph_weights = vf_output['s'].new_ones(g.batch_size)
         if self.time_scaled_loss:
-            time_weights = self.interpolant_scheduler.loss_weights(t)
+            time_weights = self.interpolant_scheduler.loss_weights(graph_time)
             state_idx = self.canonical_feat_order.index('s')
             edge_idx = self.canonical_feat_order.index('e')
             graph_weights = 0.5 * (
@@ -776,23 +941,49 @@ class FlowMol(pl.LightningModule):
             **vector_field_kwargs,
         )
 
+    def _validation_forward(
+        self,
+        g: dgl.DGLGraph,
+        *,
+        t: torch.Tensor,
+        graph_time: torch.Tensor,
+        corruption_generator: torch.Generator,
+    ) -> Dict[str, torch.Tensor]:
+        """Run one deterministic, fully conditioned validation pass.
+
+        Guidance subclasses may override this hook when their public forward
+        method needs an additional inference/training-mode selector.
+        """
+        return self(
+            g,
+            t=t,
+            graph_time=graph_time,
+            corruption_generator=corruption_generator,
+            condition_dropout=False,
+            self_conditioning=True,
+        )
+
     def deterministic_validation_losses(self, g: dgl.DGLGraph, batch_idx: int):
         """Evaluate a fixed time/noise grid with conditioning always enabled."""
 
         losses_by_time = []
-        for grid_idx, time_value in enumerate(self.validation_time_grid):
+        for grid_idx, (time_value, graph_time_value) in enumerate(zip(
+            self.validation_time_grid, self.validation_graph_time_grid
+        )):
             seed = self.validation_seed + batch_idx * len(self.validation_time_grid) + grid_idx
             generator = self._seeded_generator(g.device, seed)
             time = torch.full(
                 (g.batch_size,), time_value, device=g.device, dtype=torch.float32
             )
             losses_by_time.append(
-                self(
+                self._validation_forward(
                     g,
                     t=time,
+                    graph_time=torch.full(
+                        (g.batch_size,), graph_time_value, device=g.device,
+                        dtype=torch.float32,
+                    ),
                     corruption_generator=generator,
-                    condition_dropout=False,
-                    self_conditioning=True,
                 )
             )
 
@@ -817,6 +1008,7 @@ class FlowMol(pl.LightningModule):
                 key=lambda idx: abs(self.validation_time_grid[idx] - 0.5),
             )
             time_value = self.validation_time_grid[midpoint_idx]
+            graph_time_value = self.validation_graph_time_grid[midpoint_idx]
             seed = (
                 self.validation_seed
                 + batch_idx * len(self.validation_time_grid)
@@ -825,15 +1017,17 @@ class FlowMol(pl.LightningModule):
             original_property = g.prop
             try:
                 g.prop = original_property.roll(shifts=1, dims=0)
-                shuffled_losses = self(
+                shuffled_losses = self._validation_forward(
                     g,
                     t=torch.full(
                         (g.batch_size,), time_value, device=g.device,
                         dtype=torch.float32,
                     ),
+                    graph_time=torch.full(
+                        (g.batch_size,), graph_time_value, device=g.device,
+                        dtype=torch.float32,
+                    ),
                     corruption_generator=self._seeded_generator(g.device, seed),
-                    condition_dropout=False,
-                    self_conditioning=True,
                 )
             finally:
                 g.prop = original_property
@@ -841,6 +1035,13 @@ class FlowMol(pl.LightningModule):
                 self._total_from_feature_losses(shuffled_losses)
                 - self._total_from_feature_losses(losses_by_time[midpoint_idx])
             )
+
+        diagnostics['coordinate_time_mean'] = torch.as_tensor(
+            self.validation_time_grid, device=g.device
+        ).mean()
+        diagnostics['graph_time_mean'] = torch.as_tensor(
+            self.validation_graph_time_grid, device=g.device
+        ).mean()
 
         return mean_losses, diagnostics
 
@@ -870,6 +1071,7 @@ class FlowMol(pl.LightningModule):
         self,
         g: dgl.DGLGraph,
         t: torch.Tensor | None = None,
+        graph_time: torch.Tensor | None = None,
         corruption_generator: torch.Generator | None = None,
         condition_dropout: bool | None = None,
         self_conditioning: bool | None = None,
@@ -903,17 +1105,16 @@ class FlowMol(pl.LightningModule):
         # this is so that we can compute OT alignments in parallel (since they cannot be done in batch)
         # g = self.sample_prior(g, node_batch_idx, upper_edge_mask)
 
-        # sample timepoints for each molecule in the batch
-        if t is None:
-            t = torch.rand(
-                batch_size, device=device, generator=corruption_generator
-            ).float()
-        else:
-            t = torch.as_tensor(t, device=device, dtype=torch.float32)
-            if t.ndim == 0:
-                t = t.expand(batch_size)
-            if t.shape != (batch_size,):
-                raise ValueError(f't must have shape ({batch_size},), got {tuple(t.shape)}')
+        # Resolve coordinate and graph corruption times.  Explicit t without an
+        # explicit graph_time requests the diagonal path for backward-compatible
+        # evaluation and reverse integration.
+        t, graph_time = self.resolve_modality_times(
+            batch_size=batch_size,
+            device=device,
+            coordinate_time=t,
+            graph_time=graph_time,
+            generator=corruption_generator,
+        )
 
         # Get property embeddings if available
         if hasattr(g, 'prop') and self.conditional_generation:
@@ -936,6 +1137,7 @@ class FlowMol(pl.LightningModule):
             edge_batch_idx,
             upper_edge_mask,
             generator=corruption_generator,
+            graph_time=graph_time,
         )
 
         # forward pass for the vector field
@@ -946,11 +1148,14 @@ class FlowMol(pl.LightningModule):
             upper_edge_mask,
             corruption_generator=corruption_generator,
             self_conditioning=self_conditioning,
+            graph_time=graph_time,
         )
 
         # get the target (label) for each feature
         targets = {}
-        alpha_t_prime = self.interpolant_scheduler.alpha_t_prime(t)
+        alpha_t_prime = self.modality_schedule_values(
+            'alpha_t_prime', t, graph_time
+        )
         for feat_idx, feat in enumerate(self.canonical_feat_order):
             if feat == 'e':
                 data_src = g.edata
@@ -1008,7 +1213,9 @@ class FlowMol(pl.LightningModule):
 
         # get the time-dependent loss weights if necessary
         if self.time_scaled_loss:
-            time_weights = self.interpolant_scheduler.loss_weights(t)
+            time_weights = self.modality_schedule_values(
+                'loss_weights', t, graph_time
+            )
             
         # compute losses
         losses = {}
@@ -1037,7 +1244,7 @@ class FlowMol(pl.LightningModule):
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(
-                g, vf_output, upper_edge_mask, t
+                g, vf_output, upper_edge_mask, graph_time
             )
         )
         return losses

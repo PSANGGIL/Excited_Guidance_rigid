@@ -61,6 +61,40 @@ def validate_chemistry_schema(config: dict) -> None:
     if self_conditioning and model.get("parameterization", "ctmc") != "ctmc":
         raise ValueError("self-conditioning is currently supported only for CTMC")
 
+    modality_time = model.get('modality_time', {}) or {}
+    unknown_modality_keys = set(modality_time) - {
+        'enabled', 'graph_clean_probability'
+    }
+    if unknown_modality_keys:
+        raise ValueError(
+            'unknown mol_fm.modality_time options: '
+            + ', '.join(sorted(unknown_modality_keys))
+        )
+    independent_time = bool(modality_time.get('enabled', False))
+    graph_clean_probability = float(
+        modality_time.get('graph_clean_probability', 0.5)
+    )
+    if (
+        not math.isfinite(graph_clean_probability)
+        or not 0.0 <= graph_clean_probability <= 1.0
+    ):
+        raise ValueError(
+            'mol_fm.modality_time.graph_clean_probability must be in [0, 1]'
+        )
+    vector_independent_time = config.get('vector_field', {}).get(
+        'independent_modality_time'
+    )
+    if (
+        vector_independent_time is not None
+        and bool(vector_independent_time) != independent_time
+    ):
+        raise ValueError(
+            'mol_fm.modality_time.enabled and '
+            'vector_field.independent_modality_time disagree'
+        )
+    if independent_time and model.get('parameterization', 'ctmc') != 'ctmc':
+        raise ValueError('independent modality time is supported only for CTMC')
+
     fake_atom_fraction = float(model.get('fake_atom_fraction', 0.0))
     fake_atom_std = float(model.get('fake_atom_std', 1.0))
     fake_atom_seed = int(model.get('fake_atom_validation_seed', 17_041))

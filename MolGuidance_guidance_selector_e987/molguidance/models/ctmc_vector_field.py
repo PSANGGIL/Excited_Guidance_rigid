@@ -133,20 +133,28 @@ class CTMCVectorField(EndpointVectorField):
         edge_batch_idx,
         upper_edge_mask,
         generator: torch.Generator | None = None,
+        graph_time: torch.Tensor | None = None,
     ):
         # sample p(g_t|g_0,g_1)
         # this includes the standard probability path for positions and CTMC probability paths for categorical features
         # t has shape (batch_size,)
-        _, alpha_t = self.interpolant_scheduler.interpolant_weights(t)
+        if graph_time is None:
+            graph_time = t
+        if graph_time.shape != t.shape:
+            raise ValueError('graph_time must have the same shape as t')
+        _, alpha_coordinate = self.interpolant_scheduler.interpolant_weights(t)
+        _, alpha_graph = self.interpolant_scheduler.interpolant_weights(graph_time)
         batch_size = g.batch_size
         num_nodes = g.num_nodes()
         device = g.device
 
-        # alpha_t has shape (batch_size, number of active modalities)
+        # Both tensors have shape (batch_size, number of active modalities).
+        # Only the x column is read from alpha_coordinate; every categorical
+        # state is read from alpha_graph.
 
         # sample positions at time t
         x_idx = self.canonical_feat_order.index('x')
-        dst_weight = alpha_t[:, x_idx][node_batch_idx].unsqueeze(-1)
+        dst_weight = alpha_coordinate[:, x_idx][node_batch_idx].unsqueeze(-1)
         src_weight = 1 - dst_weight
         g.ndata['x_t'] = src_weight*g.ndata['x_0'] + dst_weight*g.ndata['x_1_true']
 
@@ -162,7 +170,7 @@ class CTMCVectorField(EndpointVectorField):
 
             # set x_t = x_1 to start
             xt = g.ndata[f'{feat}_1_true'].argmax(-1) # has shape (num_nodes,)
-            alpha_t_feat = alpha_t[:, feat_idx][node_batch_idx] # has shape (num_nodes,)
+            alpha_t_feat = alpha_graph[:, feat_idx][node_batch_idx] # has shape (num_nodes,)
 
             # set each node's feature to the mask token with probability 1 - alpha_t
             mask_draws = torch.rand(
@@ -175,7 +183,7 @@ class CTMCVectorField(EndpointVectorField):
         num_edges = g.num_edges() / 2
         num_edges = int(num_edges)
         e_idx = self.canonical_feat_order.index('e')
-        alpha_t_e = alpha_t[:, e_idx][edge_batch_idx][upper_edge_mask]
+        alpha_t_e = alpha_graph[:, e_idx][edge_batch_idx][upper_edge_mask]
         et_upper = g.edata['e_1_true'][upper_edge_mask].argmax(-1)
         edge_mask_draws = torch.rand(
             num_edges, device=device, generator=generator
@@ -598,7 +606,8 @@ class CTMCVectorField(EndpointVectorField):
     def forward(self, g: dgl.DGLGraph, t: torch.Tensor, 
                 node_batch_idx: torch.Tensor, upper_edge_mask: torch.Tensor, 
                 apply_softmax=False, remove_com=False,
-                previous_endpoint: dict[str, torch.Tensor] | None = None):
+                previous_endpoint: dict[str, torch.Tensor] | None = None,
+                graph_time: torch.Tensor | None = None):
         device = g.device
         
         with g.local_scope():
@@ -607,9 +616,23 @@ class CTMCVectorField(EndpointVectorField):
             
             # Gather base features
             time_tensor = t[:, 0] if len(t.shape) > 1 else t
+            if graph_time is None:
+                graph_time = time_tensor
+            graph_time = torch.as_tensor(
+                graph_time, device=device, dtype=time_tensor.dtype
+            )
+            if graph_time.ndim == 0:
+                graph_time = graph_time.expand(g.batch_size)
+            if graph_time.shape != time_tensor.shape:
+                raise ValueError(
+                    'graph_time must match the graph-level coordinate time shape'
+                )
             
             base_features = self.build_node_scalar_inputs(
-                g, time_tensor, node_batch_idx
+                g,
+                time_tensor,
+                node_batch_idx,
+                graph_time_tensor=graph_time,
             )
             node_scalar_features = self.scalar_embedding_uncond(base_features)
 
@@ -724,18 +747,20 @@ class CTMCVectorField(EndpointVectorField):
                     )
 
                     # every convs_per_update convolutions, update the node positions and edge features
-                    if conv_idx != 0 and (conv_idx + 1) % self.convs_per_update == 0:
-
-                        if self.separate_mol_updaters:
-                            updater_idx = conv_idx // self.convs_per_update
-                        else:
-                            updater_idx = 0
-
-                        node_positions = self.node_position_updaters[updater_idx](node_scalar_features, node_positions, node_vec_features)
-
-                        x_diff, d = self.precompute_distances(g, node_positions)
-
-                        edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features, d=d)
+                    updater_idx = self.molecule_update_index(conv_idx)
+                    if updater_idx is not None:
+                        node_positions, edge_features, x_diff, d = (
+                            self.update_molecule_state(
+                                g,
+                                node_scalar_features,
+                                node_vec_features,
+                                edge_features,
+                                node_positions,
+                                d,
+                                upper_edge_mask,
+                                updater_idx,
+                            )
+                        )
 
             
             # predict final categorical node states

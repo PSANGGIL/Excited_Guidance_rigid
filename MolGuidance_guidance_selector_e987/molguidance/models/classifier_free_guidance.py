@@ -187,7 +187,10 @@ class ClassifierFreeGuidance(FlowMol):
         # Create SetEmbeddingType controller
         self.embedding_controller = SetEmbeddingType(p_unconditional=p_uncond)
 
-        vector_field_config = kwargs.get("vector_field_config", {}) 
+        vector_field_config = dict(kwargs.get("vector_field_config", {}))
+        vector_field_config['independent_modality_time'] = (
+            self.independent_modality_time
+        )
 
         # Create unconditional embedder (zero embedding)
         self.unconditional_embedder = ZerosEmbedding(hidden_dim=self.property_embedding_dim)
@@ -210,6 +213,7 @@ class ClassifierFreeGuidance(FlowMol):
         self,
         g: dgl.DGLGraph,
         t: torch.Tensor | None = None,
+        graph_time: torch.Tensor | None = None,
         corruption_generator: torch.Generator | None = None,
         condition_dropout: bool | None = None,
         self_conditioning: bool | None = None,
@@ -234,16 +238,13 @@ class ClassifierFreeGuidance(FlowMol):
         # Create a mask which selects all of the upper triangle edges from the batched graph
         upper_edge_mask = get_upper_edge_mask(g)
 
-        if t is None:
-            t = torch.rand(
-                batch_size, device=device, generator=corruption_generator
-            ).float()
-        else:
-            t = torch.as_tensor(t, device=device, dtype=torch.float32)
-            if t.ndim == 0:
-                t = t.expand(batch_size)
-            if t.shape != (batch_size,):
-                raise ValueError(f't must have shape ({batch_size},), got {tuple(t.shape)}')
+        t, graph_time = self.resolve_modality_times(
+            batch_size=batch_size,
+            device=device,
+            coordinate_time=t,
+            graph_time=graph_time,
+            generator=corruption_generator,
+        )
 
         if condition_dropout is None:
             condition_dropout = self.training
@@ -280,6 +281,7 @@ class ClassifierFreeGuidance(FlowMol):
             edge_batch_idx,
             upper_edge_mask,
             generator=corruption_generator,
+            graph_time=graph_time,
         )
 
         # forward pass for the vector field
@@ -290,11 +292,14 @@ class ClassifierFreeGuidance(FlowMol):
             upper_edge_mask,
             corruption_generator=corruption_generator,
             self_conditioning=self_conditioning,
+            graph_time=graph_time,
         )
 
         # get the target (label) for each feature
         targets = {}
-        alpha_t_prime = self.interpolant_scheduler.alpha_t_prime(t)
+        alpha_t_prime = self.modality_schedule_values(
+            'alpha_t_prime', t, graph_time
+        )
 
         assert self.parameterization == "ctmc", "ClassifierFreeGuidance only supports CTMC parameterization"
 
@@ -339,7 +344,9 @@ class ClassifierFreeGuidance(FlowMol):
 
         # get the time-dependent loss weights if necessary
         if self.time_scaled_loss:
-            time_weights = self.interpolant_scheduler.loss_weights(t)
+            time_weights = self.modality_schedule_values(
+                'loss_weights', t, graph_time
+            )
             
         # compute losses
         losses = {}
@@ -368,7 +375,7 @@ class ClassifierFreeGuidance(FlowMol):
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(
-                g, vf_output, upper_edge_mask, t
+                g, vf_output, upper_edge_mask, graph_time
             )
         )
         return losses        
