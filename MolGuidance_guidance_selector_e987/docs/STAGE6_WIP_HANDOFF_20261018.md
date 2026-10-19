@@ -121,4 +121,29 @@ The initial Stage-6 commit is `af62e47`. Subsequent B200 optimizer-step probes
 measured 51.0% reserved memory at batch 512 and 73.8% at batch 704. The latter
 completed with finite loss and gradients, but real Lightning training later
 reached 93.0% at batch 704. That run was stopped after epoch 6 and preserved;
-batch 512 was restored as the production setting.
+batch 512 was restored as the production setting for the allocator audit.
+
+## Production launch update — 2026-10-19
+
+The apparent epoch-to-epoch memory growth was CUDA allocator fragmentation from
+the varying complete-graph sizes, not retained model graphs. Without expandable
+segments, the batch-512 Lightning run rose to 181774 MiB by epoch 11. With
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, batch 512 stabilized near
+100020 MiB through the same interval. Both diagnostic runs were stopped and
+their outputs were preserved.
+
+The final production candidate uses batch 640 and the expandable-segment
+allocator. At epoch 10 it occupied 125022 MiB of the 182631.6 MiB B200
+(68.5%). Train loss fell from 14.9 to 3.49 and deterministic validation loss
+from 13.5 to 3.14. The detached process was retained as the long run:
+
+- PID at launch verification: `572069`
+- run directory:
+  `../runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/hp1kg-est-cfg-stage6-b640-expandable_a73c71od`
+- launcher log:
+  `../runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/launcher_b640_expandable_20261019.log`
+- reproducible launcher: `scripts/train_stage6_b200.sh`
+
+The launcher makes the allocator requirement explicit. Starting this config
+without the launcher (or an equivalent environment setting) can again consume
+nearly all device memory even at a smaller batch size.

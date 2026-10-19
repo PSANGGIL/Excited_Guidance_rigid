@@ -103,10 +103,10 @@ mol_fm:
     s: 1.0
     e: 2.0
 training:
-  # A standalone batch-704 probe reserved 73.8%, but shuffled Lightning
-  # training reached 169886 MiB (93.0%) on the B200. Batch 512 restores
-  # headroom for molecule-size variation, validation, and allocator caching.
-  batch_size: 512
+  # Requires expandable CUDA allocator segments on this B200 because complete
+  # graph sizes vary by batch. Batch 640 targets roughly 70% device memory;
+  # use scripts/train_stage6_b200.sh so the allocator contract is applied.
+  batch_size: 640
   evaluation:
     mols_to_sample: 32
     sample_interval: 1.0

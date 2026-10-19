@@ -694,5 +694,14 @@ and 516166 directed edges. Batch 704 used 134704 MiB reserved (73.8%) and
 isolated steps were finite, including AdamW update. However, the first real
 Lightning run at batch 704 reached 169886 MiB (93.0%) because shuffled molecular
 sizes and framework/allocator lifetime produced a larger peak. It was stopped
-cleanly after epoch 6 with its files preserved. Batch 704 is rejected as the
-production default; the fresh run uses batch 512 for variation headroom.
+cleanly after epoch 6 with its files preserved. A subsequent batch-512 run
+without allocator tuning similarly climbed to 181774 MiB by epoch 11.
+
+This was isolated to CUDA allocator fragmentation from variable complete-graph
+shapes: setting `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` held a
+batch-512 run near 100020 MiB. The production configuration therefore uses
+batch 640 with that allocator setting. It reached epoch 10 at 125022 MiB
+(68.5% of the 182631.6 MiB device), while train/validation loss decreased from
+14.9/13.5 to 3.49/3.14. The reproducible entry point is
+`scripts/train_stage6_b200.sh`; it supplies the allocator contract and launches
+a fresh Stage-6 run rather than loading a Stage-5 checkpoint.
