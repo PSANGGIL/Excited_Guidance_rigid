@@ -103,9 +103,10 @@ mol_fm:
     s: 1.0
     e: 2.0
 training:
-  # Measured on a B200 (182631.6 MiB usable): one full self-conditioned
-  # forward/backward/AdamW step reserved 134704 MiB (73.8%) at batch 704.
-  batch_size: 704
+  # A standalone batch-704 probe reserved 73.8%, but shuffled Lightning
+  # training reached 169886 MiB (93.0%) on the B200. Batch 512 restores
+  # headroom for molecule-size variation, validation, and allocator caching.
+  batch_size: 512
   evaluation:
     mols_to_sample: 32
     sample_interval: 1.0

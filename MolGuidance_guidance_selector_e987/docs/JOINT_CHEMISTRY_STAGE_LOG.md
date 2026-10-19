@@ -691,5 +691,8 @@ Before launch, full self-conditioned optimizer-step probes were run on the
 182631.6 MiB B200. Batch 512 used 93070 MiB reserved (51.0%) for 15341 nodes
 and 516166 directed edges. Batch 704 used 134704 MiB reserved (73.8%) and
 131263.9 MiB allocated (71.9%) for 21572 nodes and 749170 directed edges. Both
-steps were finite, including AdamW update. Batch 704 is therefore the measured
-Stage-6 default on this machine; it is not a portable default for smaller GPUs.
+isolated steps were finite, including AdamW update. However, the first real
+Lightning run at batch 704 reached 169886 MiB (93.0%) because shuffled molecular
+sizes and framework/allocator lifetime produced a larger peak. It was stopped
+cleanly after epoch 6 with its files preserved. Batch 704 is rejected as the
+production default; the fresh run uses batch 512 for variation headroom.

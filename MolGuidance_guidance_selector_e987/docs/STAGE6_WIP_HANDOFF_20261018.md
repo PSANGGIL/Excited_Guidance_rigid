@@ -119,4 +119,6 @@ files and launch a fresh run rather than loading a Stage-5 checkpoint.
 
 The initial Stage-6 commit is `af62e47`. Subsequent B200 optimizer-step probes
 measured 51.0% reserved memory at batch 512 and 73.8% at batch 704. The latter
-completed with finite loss and gradients and is now the configured batch size.
+completed with finite loss and gradients, but real Lightning training later
+reached 93.0% at batch 704. That run was stopped after epoch 6 and preserved;
+batch 512 was restored as the production setting.
