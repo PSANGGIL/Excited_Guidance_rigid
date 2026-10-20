@@ -1,0 +1,162 @@
+{
+  "conclusion": "Aromatic/cyclic failures contribute, but do not alone explain enrichment of ringless near-zero-EST outputs.",
+  "model_or_checkpoint_changed": false,
+  "new_training": false,
+  "new_xtb_calculations": false,
+  "completed": {
+    "steps": {
+      "state": "complete",
+      "pid": 2049141,
+      "elapsed_seconds": 658.5804853439331,
+      "samples": 512
+    },
+    "counts": {
+      "state": "complete",
+      "pid": 2053253,
+      "elapsed_seconds": 280.1277208328247,
+      "samples": 256
+    }
+  },
+  "first_stage_counts": {
+    "source_DB": 1581,
+    "source_aromatic": 1362,
+    "source_nonaromatic": 219,
+    "denoiser_forward_cases": 15525,
+    "intervention_decodes": 93150,
+    "partial_reverse": 648,
+    "free_samples": 416
+  },
+  "replication_new_samples": 768,
+  "novel_pngs": [
+    {
+      "setting": "screen_atom_guidance_only",
+      "novel_unique_png_molecules": 25,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "screen_baseline",
+      "novel_unique_png_molecules": 22,
+      "database_matches": 1,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 0
+    },
+    {
+      "setting": "screen_cfg2",
+      "novel_unique_png_molecules": 27,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 0
+    },
+    {
+      "setting": "screen_coordinate_guidance_only",
+      "novel_unique_png_molecules": 17,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 3
+    },
+    {
+      "setting": "screen_edge_guidance_only",
+      "novel_unique_png_molecules": 22,
+      "database_matches": 1,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "screen_est_0p5",
+      "novel_unique_png_molecules": 18,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 3
+    },
+    {
+      "setting": "screen_est_1p0",
+      "novel_unique_png_molecules": 26,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "screen_self_conditioning_off",
+      "novel_unique_png_molecules": 14,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "screen_steps250",
+      "novel_unique_png_molecules": 27,
+      "database_matches": 2,
+      "duplicate_records": 1,
+      "sdf_reread_failures": 0
+    },
+    {
+      "setting": "screen_stochasticity0",
+      "novel_unique_png_molecules": 16,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 0
+    },
+    {
+      "setting": "screen_temperature_0p2",
+      "novel_unique_png_molecules": 25,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 0
+    },
+    {
+      "setting": "screen_temperature_1p0",
+      "novel_unique_png_molecules": 19,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "screen_unconditional",
+      "novel_unique_png_molecules": 23,
+      "database_matches": 0,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 1
+    },
+    {
+      "setting": "replication_steps100",
+      "novel_unique_png_molecules": 200,
+      "database_matches": 1,
+      "duplicate_records": 0,
+      "sdf_reread_failures": 4
+    },
+    {
+      "setting": "replication_steps250",
+      "novel_unique_png_molecules": 200,
+      "database_matches": 4,
+      "duplicate_records": 2,
+      "sdf_reread_failures": 2
+    },
+    {
+      "setting": "replication_db_conditional_counts_steps100",
+      "novel_unique_png_molecules": 169,
+      "database_matches": 1,
+      "duplicate_records": 1,
+      "sdf_reread_failures": 2
+    }
+  ],
+  "statistical_limits": "Per-setting N=256 across two seeds. Within paired steps, initial fixtures are identical but outcomes are different molecules. Bootstrap is over sample indices, not a large number of independent model seeds. Count-distribution intervention changes graph dimensions and cannot share identical noise tensors.",
+  "physical_limits": "Only the existing 1000-sample checkpoint cohorts have XTB/sTDA results. New setting comparisons establish structural effects, not EST fidelity or physical feasibility.",
+  "old_DB_calculation_caveat": "Historical DB XTB/sTDA started from ETKDG/MMFF conformers; generated cohorts started from diffusion coordinates. Do not attribute the whole DB/reference energy gap to electronic-structure method alone.",
+  "threshold_correction": "Inclusive |EST|<=0.1 with 1e-6 tolerance: DB231 instead of227; e1074 calculated hits59 instead of58.",
+  "references": [
+    {
+      "url": "https://www.rdkit.org/docs/RDKit_Book.html#aromaticity",
+      "use": "Aromaticity depends on complete atom/bond environment. Invalid raw cycles are not automatically labelled intended aromatic."
+    },
+    {
+      "url": "https://www.rdkit.org/docs/RDKit_Book.html#molecular-sanitization",
+      "use": "Separating valence sanitization from aromatic perception; these checks do not establish physical stability."
+    },
+    {
+      "url": "https://arxiv.org/abs/2402.04997",
+      "use": "Continuous/discrete multimodal flow context; the local implementation uses masked CTMC for categorical features and coordinate flow, not Gaussian bond DDPM."
+    }
+  ]
+}

@@ -3,6 +3,11 @@
 This log records each architecture change independently so later regressions can
 be attributed to one stage rather than to a bundle of simultaneous changes.
 
+Latest saved state: [Stage 6 training, generation, and performance record —
+2026-10-20](#stage-6-training-generation-and-performance-record-2026-10-20).
+Earlier sections are historical implementation snapshots, not the latest
+training or mathematical-consistency verdict.
+
 ## Baseline
 
 - Branch point: `a4c3f47`
@@ -705,3 +710,187 @@ batch 640 with that allocator setting. It reached epoch 10 at 125022 MiB
 14.9/13.5 to 3.49/3.14. The reproducible entry point is
 `scripts/train_stage6_b200.sh`; it supplies the allocator contract and launches
 a fresh Stage-6 run rather than loading a Stage-5 checkpoint.
+
+## Stage 6 training generation and performance record 2026-10-20
+
+사용자 요청에 따라 현재 모델의 구조, DB, 실제 학습 내역, 생성 실행 이력,
+물성·구조 성능, 음수 EST 후보와 미적용 개선안을 함께 저장했다.
+이 기록은 앞선 시작 시점의 학습 상태를 대체한다. 모델·학습 코드, DB,
+체크포인트 및 기존 생성 결과를 수정하거나 새로운 학습·생성·XTB를 실행하지 않았다.
+
+### 저장 위치와 코드 기준점
+
+- 브랜치: `feature/molguidance-joint-chemistry-self-correction`.
+- 코드 기준점: `f8610ed8cddca762525b86ffd1b7ab77eab57879`.
+  기존 모델은 `ded8ad1`까지 커밋됐고 `f8610ed`는 진단 스크립트6개와 감사 문서 추가다.
+- 사용자 요청에 따라 문서·기록 추출 스크립트·요약 산출물을 Git 기록에 포함한다.
+  DB·체크포인트·대용량 생성 원본은 경로와 해시만 기록하며 Git에 추가하지 않는다.
+- 통합 기록 폴더:
+  `/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/stage6_training_generation_record_20261020`.
+- 상세 한국어 기록: 위 폴더의 `REPORT_KO.txt`.
+- 학습: `training_steps.csv` 4000 step, `training_epochs.csv` 및
+  `validation_epochs.csv` 각2000 epoch, `training_summary.json`, `training_loss_history.png`.
+- 생성: `generation_inventory.csv/json`, `checkpoint_comparison.csv/json`, `cfg_comparison.csv/json`.
+- 검증: `negative_est_novelty_check.json`, `diagnostic_results.json`,
+  `diagnostic_replications.csv`, `atom_count_provenance.json`, `source_manifest.json`.
+- 기록 추출 코드: 저장소 루트의 `diagnostics/save_stage6_history_20261020.py`.
+  기존 결과를 읽고 새 출력 폴더만 만들며, 같은 출력 폴더 재사용은 거부한다.
+
+### 현재 모델과 학습 내역
+
+현재 모델은 heavy-atom Cartesian continuous flow와 masked categorical CTMC의
+결합이며, 단일 EST 스칼라를 조건으로 받는다. 원소·형식전하·붙은 H 수는
+joint atom state로 예측하고 H를 별도 좌표 노드로 생성하지 않는다.
+37개 화학 state와 fake state1개, NONE/SINGLE/DOUBLE/TRIPLE Kekule edge,
+self-conditioning, independent modality time, bond-first geometry를 사용한다.
+full GVP의 reflection 정합성 등은 아래 감사 문서에 미해결로 남아 있다.
+
+- 실제 DB: `molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz`.
+  HP1KG1581개, train1264/val158/test159. 공식 최적화 XYZ를 사용한다.
+- EST train 정규화: mean0.5285704/std0.5375195.
+- 최종 학습 run: `runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/hp1kg-est-cfg-stage6-b640-expandable_a73c71od`.
+- batch640, precision32-true, **torch.optim.Adam** lr0.0014,
+  weight_decay1e-12, warmup50 epoch, gradient value clip1.0.
+  과거 smoke 설명의 AdamW 표현과 구분한다. 실제 optimizer는 Adam이다.
+- B200 메모리 조정: batch704는 실제 학습93%까지 증가해 중단·보존;
+  batch512도 allocator fragmentation 확인. 최종 batch640은
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`를 적용했다.
+  시작 검증 epoch10에서125022MiB/182631.6MiB(68.5%)였다.
+- condition dropout0.1; self-conditioning rate0.5;
+  graph_clean_probability0.5; fake_atom_fraction0.3.
+- 좌표/노드/결합 loss weight3/1/2.
+  auxiliary edge-existence/valence/charge/connectivity/aromatic=0.5/0.05/0.05/0.25/0.2.
+- **epoch0~1999, 총2000 epoch 및4000 optimizer step 완료**.
+  로그는 `max_epochs=2000` 도달에 의한 정상 종료를 명시한다. early stop이 아니다.
+- 첫 training metric은2026-10-19 02:04:11 UTC,
+  마지막 validation metric은06:57:38 UTC다.
+- 정확한 loss는 진행바가 아닌 offline W&B의8000 history record에서 추출했다.
+  epoch별 train 값은 두 logged step의 산술평균이며 표본수 가중 epoch loss가 아니다.
+  val은 고정 time grid, train은 stochastic time/dropout이므로 절대값 비교에 주의한다.
+
+| epoch (0-based) | train step 평균 | validation loss |
+|---|---:|---:|
+| 0 | 15.346108913 | 13.498555183 |
+| 499 | 0.527780920 | 0.310031801 |
+| 1074 | 0.428691179 | 0.161960557 |
+| 1713 | 0.374744773 | 0.120871797 |
+| 1944 | 0.336322188 | 0.119524367 |
+| 1983 | 0.365617454 | 0.119606256 |
+| 1999 | 0.349462822 | 0.129069224 |
+
+최저 val checkpoint는 `epoch=1944-step=3890.ckpt`다.
+보존된 top3는 e1866/e1944/e1983이다.
+**`last.ckpt` 내부는 e1983/step3968이며 마지막 logged epoch1999와 다르다.**
+파일명만 보고 epoch1999 재개 체크포인트로 간주하면 안 된다.
+원인은 이번 기록 작업에서 수정하지 않았다.
+
+### 생성 이력과 현재 성능
+
+완료된 본 생성은7개 실행이며 각1000개, 총7000회 요청이다.
+실행 간 분자 중복을 제거한 총합은 아니다.
+e624 준비 폴더는 완료 산출물이 없어 별도로 표시했다.
+
+| 실행 | RDKit valid | DB 제외 unique connected | XTB/STDA 성공 |
+|---|---:|---:|---:|
+| e709 CFG2 | 588 | 450 | 250/250 계산 시도 |
+| e1074 초기 CFG2 | 653 | 543 | 213/214 계산 시도 |
+| e1074 paired CFG0 | 737 | 660 | 383/383 계산 시도 |
+| e1074 paired CFG1 | 713 | 631 | 305/305 계산 시도 |
+| e1074 paired CFG2 | 695 | 615 | 248/248 계산 시도 |
+| e1713 CFG1 | 878 | 848 | 569/569 계산 시도 |
+| e1944 CFG1 | 776 | 728 | 509/509 계산 시도 |
+
+초기 e1074 CFG2의1건은 `stda_parse_failed`다.
+초기 CFG2와 paired CFG2는 원자 수 입력이 다른 별도 실행이므로 혼동하지 않는다.
+XTB 시도 전 전하/라디칼/SDF 재독해 필터가 있으므로 계산 성공100%를
+전체 생성1000개 성공률로 쓰면 안 된다.
+
+동일 입력 체크포인트 비교는 EST0eV, CFG1, seed20261019,
+100 time-grid points(99 updates), 동일 원자 수 벡터를 사용했다.
+원자 수 벡터는5~44/평균24.485이며 이전 e1074 CFG2 출력에서 유래했다.
+현재 train DB의 fresh p(n|EST0) 표본이 아니지만 세 checkpoint간 상대 비교는 통제돼 있다.
+
+| 지표 | e1074 | e1713 | e1944 |
+|---|---:|---:|---:|
+| calculated EST MAE, eV | 0.485741 | 0.488016 | 0.446279 |
+| abs(EST)<=0.1, 경계 포함 재집계 | 59 | 91 | 132 |
+| 위 조건의 방향족 후보, 경계 포함 | 31 | 57 | 56 |
+| clean-supported 방향족 후보 | 16 | 33 | 29 |
+| 위 조건의 ringless 후보 | 5 | 16 | 51 |
+| 최적화 heavy RMSD 중앙값, A | 0.912063 | 0.889617 | 0.783910 |
+| 방향족 포함 EST<0 | 10 | 13 | 5 |
+
+이전 비교표의 e1074 nearzero58/방향족30은 부동소수점 경계 때문에
+generation825의1.428-1.528=-0.100eV를 제외한 값이다.
+inclusive 재집계는59/31이며 clean-supported16은 그대로다.
+기존 비교 JSON/CSV의 수치는 역사적 기록으로 보존하고 차이를 통합 보고서에 명시했다.
+DB nearzero도 이전227 대신 경계 포함231개를 사용한다.
+
+최저 val은e1944지만 생성 유효율과 clean-supported aromatic 후보 수는e1713이 우세하다.
+e1713->e1944의 전체 nearzero91->132 증가 중 ringless가16->51로35개 증가하고,
+aromatic은57->56이다. 전체 hit 증가를 방향족 조건 제어 개선으로 해석하지 않는다.
+추가 학습만으로 이 목적이 개선된다는 증거는 없다.
+
+e1074 paired CFG0/1/2에서 EST MAE는0.517927/0.485741/0.463327eV,
+nearzero hit는45/59/64(경계 포함)였다. 다만 valid는737/713/695,
+clean-supported hit는24/28/17이었다. 조건 효과와 구조 악화를 함께 기록한다.
+CFG0는 denoiser 조건미사용이며 원자 수 벡터는 동일하다.
+
+구조 proxy의 기준과 분모는 원본 비교 보고서에 정의돼 있다.
+topology-clean은 중성/라디칼0/3·4원 고리없음/9원 이상없음이며
+ringless와7·8원 고리는 허용하므로 화학적 안정성·합성 가능성 인증은 아니다.
+XTB는 diffusion heavy 좌표를 유지한 채 RDKit으로 H 좌표만 추가한 상태에서 시작했고,
+ETKDG로 재생성하지 않았다. e1944의144/509는 최적화에서 heavy RMSD1A 초과 이동했다.
+
+### 추가 진단과 음수 EST 5개
+
+- 전체 DB codec identity1581/1581.
+- Denoiser15525조건/93150구조 판정, partial reverse648회.
+- 생성 screening416회 및 재검증768회, 총1184회. 본 생성7000회와 별도다.
+  이 진단 생성에는 새 XTB 계산을 하지 않았다.
+- e1944 invalid224는 AtomValenceException. H 제약만 푸는 진단에서53개
+  (방향족48개)가 sanitize되지만 생산 성공 수로 합산하지 않았다.
+- 원자 수가 큰 고리 포함 구조의 오류 누적과 atom/H–bond 불일치가 관찰됐다.
+  방향족 자체의 효과를 원자 수 효과와 분리해 확정한 것은 아니다.
+- test 방향족141개, t=.5: true 조건valid101/141·identity38/141,
+  null 조건105/141·43/141. 조건 추가가 반드시 악화시킨다는 증거는 아니다.
+- 100->250 point 재검증valid205->208/256, 방향족164->168.
+  중성 방향족112->136의 신호는 있으나 다중검정 후 유의하지 않았다.
+- DB nearzero231개 중 방향족195(84.4%). 과거 DB XTB에서 nearzero를 유지한
+  115개 중 방향족86(74.8%)인 반면 생성 XTB nearzero132 중 방향족56(42.4%)이다.
+  계산·선별만으로 모든 생성 편향이 설명되지는 않는다.
+
+e1944의 방향족 포함 음수 EST5개는 다음과 같다.
+
+| generation index | XTB 작업 번호 | S1,eV | T1,eV | EST,eV |
+|---|---|---:|---:|---:|
+| 366 | generated_000267 | 2.587 | 2.603 | -0.016 |
+| 504 | generated_000367 | 2.702 | 2.704 | -0.002 |
+| 528 | generated_000388 | 0.591 | 2.177 | -1.586 |
+| 683 | generated_000500 | 2.739 | 2.740 | -0.001 |
+| 838 | generated_000610 | 0.260 | 0.848 | -0.588 |
+
+XYZ 폴더는
+`runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz`다.
+5개 모두 수소 포함 XTB 최적화 SDF를 순서대로 변환했으며 원본 좌표 대비 차이0이다.
+새 컨포머 생성이나 추가 최적화는 하지 않았다.
+`manifest.csv/json`에 generation index와 XTB job index의 차이, 에너지, 파일 해시를 남겼다.
+실제 train/val/test SMILES 전체1581개와 비입체 canonical SMILES로 재대조해
+5개 모두 동일 구조0건임을 확인했다. Tautomer/protonation을 합쳐 비교하거나 외부 DB를
+검색한 것은 아니다. XYZ에는 결합 정보가 없으며 저장된 SDF 그래프가 생성 SMILES와
+같다는 것만 확인했다. 계산상 음수 EST는 실제 inverted state 인증이 아니다.
+
+### 아직 적용하지 않은 다음 수정안
+
+EST 입력은 유지한다. 평균 결합차수 합만 검사하는 valence loss 대신
+원자 상태(원소/전하/H)와 결합 조합의 호환 확률을 시험하고,
+기존 self-conditioning에 원자/H->결합 및 결합->원자 교차 피드백을 검토한다.
+이는 국소·factorized 근사이며 전역 aromatic/Kekule cycle 정합성 보장은 아니다.
+조건 경로는 동일-noise/heldout 반복에서 악화가 재현될 때만 잔차 분리 등을 검토한다.
+조건을 무시해 validity만 올리는 결과는 개선으로 인정하지 않는다.
+
+이 설계는 **아직 모델에 미적용**이다. 기존
+`STAGE6_LOGIC_MATH_AUDIT_20261019.md`의 categorical time-loss reduction,
+independent-time train/sample contract, full-GVP reflection/Kabsch,
+property normalization, edge-budget wiring, checkpoint evaluation 등도
+해결 완료로 간주하지 않는다. 기존 체크포인트와 모든 결과를 보존한다.
