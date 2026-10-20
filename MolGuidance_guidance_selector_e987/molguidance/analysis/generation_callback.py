@@ -4,6 +4,7 @@ No XTB jobs are launched during optimization. SDF/targets are exported for the
 existing external XTB/sTDA workflow; fidelity is explicitly UNMEASURED here.
 """
 import json
+import math
 import random
 import warnings
 import uuid
@@ -22,13 +23,16 @@ from molguidance.model_utils.provenance import sha256_file, state_dict_sha256
 
 class GenerationValidation(Callback):
     def __init__(self, output_dir, data_dir, every_n_epochs=50, n_samples=64,
-                 batch_size=8, n_timesteps=100, seed=17041):
+                 batch_size=8, n_timesteps=100, seed=17041, target_est_eV=None):
         super().__init__()
         if min(every_n_epochs, n_samples, batch_size) < 1 or n_timesteps < 2:
             raise ValueError("invalid validation generation dimensions")
         self.output_dir, self.data_dir = Path(output_dir), Path(data_dir).resolve()
         self.every_n_epochs, self.n_samples = int(every_n_epochs), int(n_samples)
         self.batch_size, self.n_timesteps, self.seed = int(batch_size), int(n_timesteps), int(seed)
+        if target_est_eV is not None and not math.isfinite(float(target_est_eV)):
+            raise ValueError("fixed EST target must be finite")
+        self.target_est_eV = None if target_est_eV is None else float(target_est_eV)
 
     def on_fit_start(self, trainer, pl_module):
         from molguidance.models.classifier_free_guidance import ClassifierFreeGuidance
@@ -52,6 +56,8 @@ class GenerationValidation(Callback):
         indices = order[:min(self.n_samples, len(order))]
         counts = (val["node_idx_array"][indices, 1] - val["node_idx_array"][indices, 0]).tolist()
         targets = val["properties"][indices].reshape(-1).tolist()  # raw eV, not normalized
+        if self.target_est_eV is not None:
+            targets = [self.target_est_eV] * len(indices)
         reference = set()
         for split in ("train", "val", "test"):
             data = torch.load(self.data_dir / f"{split}_data_processed.pt", map_location="cpu", weights_only=False)
@@ -141,6 +147,8 @@ class GenerationValidation(Callback):
         report = summarize_records(rows)
         report.update(epoch=epoch, optimizer_step=step, seed=self.seed,
                       time_grid_points=self.n_timesteps, guidance_scale=1.,
+                      condition_panel=("validation_labels" if self.target_est_eV is None else "fixed_est"),
+                      fixed_target_est_eV=self.target_est_eV,
                       condition_fidelity_status="not_measured_requires_external_calculation",
                       geometry_definition="unoptimized covalent-radius/planarity screen; not PoseBusters or physical stability",
                       sampling_path="diagonal", data_manifest=model.data_manifest,

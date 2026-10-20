@@ -115,6 +115,10 @@ class Stage7EvaluationTests(unittest.TestCase):
         self.assertFalse(radical["eligible"])
         self.assertEqual(summarize_records([])["requested"], 0)
         self.assertEqual(summarize_records([fragment, charged, radical])["eligible_rate"], 0.)
+        fragment["novel_unique"] = True
+        self.assertEqual(summarize_records([fragment])["novel_unique_rate"], 1.)
+        self.assertEqual(summarize_records([fragment])["novel_unique_connected_rate"], 0.)
+        self.assertEqual(summarize_records([fragment])["novel_unique_eligible_rate"], 0.)
 
     def test_geometry_is_checked_before_any_coordinate_repair(self):
         mol = _ethane()
@@ -159,6 +163,15 @@ class Stage7EvaluationTests(unittest.TestCase):
             self.assertEqual(len(list((path / "out").rglob("*.png"))), 1)
             callback.evaluate(model, 0, 1)
             self.assertEqual(len(list((path / "out").rglob("report.json"))), 2)
+            fixed = GenerationValidation(
+                path / "fixed", path, n_samples=2, batch_size=1, n_timesteps=5, target_est_eV=0.,
+            )
+            fixed_report = fixed.evaluate(model, 0, 1)
+            self.assertTrue(all(row["target_est_eV"] == 0. for row in fixed_report["records"]))
+            self.assertEqual(
+                [row["requested_heavy_atoms"] for row in report["records"]],
+                [row["requested_heavy_atoms"] for row in fixed_report["records"]],
+            )
 
     def test_failed_or_stale_generation_cannot_select_a_quality_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -80,4 +80,10 @@ def summarize_records(records):
         row["eligible"] and row["topology_screen"] for row in records
     ) / max(total, 1)
     result["novel_unique_rate"] = sum(row.get("novel_unique", False) for row in records) / max(total, 1)
+    result["novel_unique_connected_rate"] = sum(
+        row.get("novel_unique", False) and row["connected"] for row in records
+    ) / max(total, 1)
+    result["novel_unique_eligible_rate"] = sum(
+        row.get("novel_unique", False) and row["eligible"] for row in records
+    ) / max(total, 1)
     return result
