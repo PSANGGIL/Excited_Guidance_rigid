@@ -8,6 +8,7 @@ import scipy
 from molguidance.models.gvp import GVPConv, GVP, _rbf, _norm_no_nan
 from molguidance.models.interpolant_scheduler import InterpolantScheduler
 from molguidance.models.self_conditioning import SelfConditioningResidualLayer
+from molguidance.models.chemistry_feedback import JointChemicalFeedback
 from molguidance.utils.dirflow import DirichletConditionalFlow, simplex_proj
 
 class EndpointVectorField(nn.Module):
@@ -41,6 +42,9 @@ class EndpointVectorField(nn.Module):
                     independent_modality_time: bool = False,
                     bond_first_geometry: bool = False,
                     bond_coordinate_scale: float = 0.1,
+                    dropout: float = 0.0,
+                    chemistry_feedback: bool = False,
+                    chemistry_state_metadata: list | None = None,
                     has_mask: bool = False # if we are using CTMC, input categorical features will have mask tokens,
                     # this means their one-hot representations will have an extra dimension,
                     # and the neural network instantiated by this method need to account for this
@@ -84,6 +88,9 @@ class EndpointVectorField(nn.Module):
         self.independent_modality_time = bool(independent_modality_time)
         self.bond_first_geometry = bool(bond_first_geometry)
         self.bond_coordinate_scale = float(bond_coordinate_scale)
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ValueError("GVP dropout must be in [0, 1)")
+        self.dropout_rate = float(dropout)
         if (
             not torch.isfinite(torch.tensor(self.bond_coordinate_scale))
             or self.bond_coordinate_scale <= 0.0
@@ -163,6 +170,16 @@ class EndpointVectorField(nn.Module):
         )
 
         self.self_conditioner = None
+        self.chemistry_feedback = None
+        if chemistry_feedback:
+            if not self.use_joint_atom_state or not self.self_conditioning or n_bond_types != 4:
+                raise ValueError("chemistry feedback requires joint Kekule states and self-conditioning")
+            # Optional modules must not shift common-backbone initialization
+            # under the same seed in paired ablations.
+            with torch.random.fork_rng(devices=[]):
+                self.chemistry_feedback = JointChemicalFeedback(
+                    chemistry_state_metadata, n_hidden_scalars, n_hidden_edge_feats
+                )
         if self.self_conditioning:
             self.self_conditioner = SelfConditioningResidualLayer(
                 node_feature_names=self.node_categorical_feats,
@@ -187,7 +204,8 @@ class EndpointVectorField(nn.Module):
                 n_update_gvps=n_update_gvps,
                 message_norm=message_norm,
                 rbf_dmax=rbf_dmax,
-                rbf_dim=rbf_dim
+                rbf_dim=rbf_dim,
+                dropout=self.dropout_rate,
             )
             )
         self.conv_layers = nn.ModuleList(self.conv_layers)
@@ -436,7 +454,7 @@ class EndpointVectorField(nn.Module):
             raise RuntimeError(
                 "a previous endpoint was supplied but self-conditioning is disabled"
             )
-        return self.self_conditioner(
+        node_scalar_features, edge_features = self.self_conditioner(
             g,
             node_hidden=node_scalar_features,
             edge_hidden=edge_features,
@@ -444,6 +462,12 @@ class EndpointVectorField(nn.Module):
             upper_edge_mask=upper_edge_mask,
             previous_endpoint=previous_endpoint,
         )
+        if self.chemistry_feedback is not None:
+            node_scalar_features, edge_features = self.chemistry_feedback(
+                g, node_scalar_features, edge_features, upper_edge_mask,
+                previous_endpoint,
+            )
+        return node_scalar_features, edge_features
 
     def build_continuous_inv_temp_func(self, schedule, max_inv_temp=None):
 

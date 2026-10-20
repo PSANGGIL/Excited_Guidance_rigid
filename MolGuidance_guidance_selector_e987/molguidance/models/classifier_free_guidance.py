@@ -9,7 +9,6 @@ from molguidance.models.flowmol import FlowMol
 from molguidance.data_processing.utils import get_batch_idxs, get_upper_edge_mask, build_edge_idxs, get_edge_batch_idxs
 from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.models.ctmc_vector_field import CTMCVectorField
-from molguidance.models.loss_utils import reduce_time_scaled_loss_equivalent
 
 
 CATEGORICAL_PROBABILITY_MODES = ("corrected", "legacy")
@@ -188,6 +187,8 @@ class ClassifierFreeGuidance(FlowMol):
         self.embedding_controller = SetEmbeddingType(p_unconditional=p_uncond)
 
         vector_field_config = dict(kwargs.get("vector_field_config", {}))
+        if vector_field_config.get("chemistry_feedback", False):
+            vector_field_config["chemistry_state_metadata"] = self.atom_state_vocab
         vector_field_config['independent_modality_time'] = (
             self.independent_modality_time
         )
@@ -366,12 +367,11 @@ class ClassifierFreeGuidance(FlowMol):
             target = targets[feat]
             losses[feat] = self.loss_fn_dict[feat](vf_output[feat], target)
 
-            # Preserve the released reduction exactly: coordinates use row-wise weights,
-            # while 1-D CE uses its factorized broadcast-equivalent.
-            if self.time_scaled_loss:
-                losses[feat] = reduce_time_scaled_loss_equivalent(
-                    losses[feat], weight
-                )
+            # Keep row-wise coordinate weighting and the configured categorical
+            # estimator (legacy defaults remain broadcast-equivalent).
+            losses[feat] = self.reduce_feature_loss(
+                feat, losses[feat], target, weight
+            )
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(
@@ -401,6 +401,8 @@ class ClassifierFreeGuidance(FlowMol):
         """
         Sample molecules with classifier-free guidance.
         """
+        if conditional_generation:
+            normalization_file_path = self.resolve_normalization_file(normalization_file_path)
         if n_timesteps is None:
             n_timesteps = self.default_n_timesteps
         if properties_handle_method is None:
@@ -511,6 +513,7 @@ class ClassifierFreeGuidance(FlowMol):
         collect_categorical_trace: bool = False,
         residual_mask_policy: str = "reject",
         dataset_name: str = "qm9",
+        n_timesteps: int | None = None,
         **kwargs):
         """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
 
@@ -543,6 +546,7 @@ class ClassifierFreeGuidance(FlowMol):
                 f"{len(atoms_per_molecule)} != {len(multilple_values_to_one_property)}"
 
         return self.sample(atoms_per_molecule, 
+            n_timesteps=n_timesteps,
             device=device,  
             stochasticity=stochasticity, 
             high_confidence_threshold=high_confidence_threshold,

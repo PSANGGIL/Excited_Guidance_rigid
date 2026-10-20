@@ -22,8 +22,13 @@ from molguidance.analysis.metrics import SampleAnalyzer
 from molguidance.data_processing.conditional_count import ConditionalAtomCountSampler
 from einops import rearrange
 from .property_embeddings import PropertyEmbedder
-from .loss_utils import reduce_time_scaled_loss_equivalent
+from .loss_utils import (
+    reduce_time_scaled_loss_equivalent, reduce_categorical_loss,
+    CATEGORICAL_REDUCTIONS,
+)
 from .chemistry_auxiliary import JointChemistryAuxiliaryLoss
+from .correction import correction_options, correction_losses
+from molguidance.model_utils.provenance import data_manifest, verify_manifest, sha256_file, state_dict_sha256
 
 
 class FlowMol(pl.LightningModule):
@@ -71,6 +76,9 @@ class FlowMol(pl.LightningModule):
                  fake_atom_validation_seed: int = 17_041,
                  fake_atom_capacity_mode: str = 'stochastic',
                  modality_time: dict | None = None,
+                 categorical_reduction: str = "legacy_factorized",
+                 correction: dict | None = None,
+                 enforce_data_manifest: bool = False,
                  ):
         super().__init__()
 
@@ -105,6 +113,17 @@ class FlowMol(pl.LightningModule):
         self.use_hydrogen_counts = self.n_hydrogen_counts > 0
         self.total_loss_weights = dict(total_loss_weights)
         self.time_scaled_loss = time_scaled_loss
+        if categorical_reduction not in CATEGORICAL_REDUCTIONS:
+            raise ValueError(f"unknown categorical_reduction: {categorical_reduction}")
+        if categorical_reduction != "legacy_factorized" and parameterization != "ctmc":
+            raise ValueError("explicit categorical reductions currently require CTMC")
+        self.categorical_reduction = categorical_reduction
+        self.correction_config = correction_options(correction)
+        self.enforce_data_manifest = bool(enforce_data_manifest)
+        if self.correction_config["weight"] > 0 and (
+            not self.use_joint_atom_state or parameterization != "ctmc" or n_bond_types != 4
+        ):
+            raise ValueError("correction requires joint atom-state / Kekule CTMC")
         self.prior_config = prior_config
         self.exclude_charges = exclude_charges
         self.marginal_dists_file = marginal_dists_file
@@ -186,6 +205,9 @@ class FlowMol(pl.LightningModule):
             'charge_weight': 0.0,
             'connectivity_weight': 0.0,
             'aromatic_weight': 0.0,
+            'distribution_valence_weight': 0.0,
+            'distribution_charge_weight': 0.0,
+            'distribution_min_time': 0.7,
         }
         chemistry_config = dict(chemistry_auxiliary or {})
         unknown_chemistry_keys = set(chemistry_config) - set(chemistry_defaults)
@@ -201,12 +223,16 @@ class FlowMol(pl.LightningModule):
                 raise ValueError(f'{key} must be finite and non-negative')
             chemistry_defaults[key] = value
         self.chemistry_auxiliary_config = chemistry_defaults
+        if chemistry_defaults["distribution_min_time"] >= 1.:
+            raise ValueError("distribution_min_time must be in [0, 1)")
         self.chemistry_loss_weights = {
             'chem_edge_existence': chemistry_defaults['edge_existence_weight'],
             'chem_valence': chemistry_defaults['valence_weight'],
             'chem_charge': chemistry_defaults['charge_weight'],
             'chem_connectivity': chemistry_defaults['connectivity_weight'],
             'chem_aromatic': chemistry_defaults['aromatic_weight'],
+            'chem_distribution_valence': chemistry_defaults['distribution_valence_weight'],
+            'chem_distribution_charge': chemistry_defaults['distribution_charge_weight'],
         }
         self.chemistry_auxiliary_enabled = any(
             value > 0.0 for value in self.chemistry_loss_weights.values()
@@ -322,6 +348,10 @@ class FlowMol(pl.LightningModule):
 
         self.configure_joint_atom_state()
         self.configure_chemistry_auxiliary()
+        self.data_manifest = (
+            data_manifest(Path(self.marginal_dists_file).parent)
+            if self.enforce_data_manifest else None
+        )
 
         # do some boring stuff regarding the prior distribution
         self.configure_prior()
@@ -361,6 +391,8 @@ class FlowMol(pl.LightningModule):
         self.interpolant_scheduler = InterpolantScheduler(canonical_feat_order=self.canonical_feat_order, 
                                                           **interpolant_scheduler_config)
         vector_field_config = dict(vector_field_config)
+        if vector_field_config.get("chemistry_feedback", False):
+            vector_field_config["chemistry_state_metadata"] = self.atom_state_vocab
         configured_independent_time = vector_field_config.get(
             'independent_modality_time', self.independent_modality_time
         )
@@ -583,6 +615,26 @@ class FlowMol(pl.LightningModule):
             ),
         )
 
+    def on_save_checkpoint(self, checkpoint):
+        if self.enforce_data_manifest:
+            checkpoint["stage7_data_manifest"] = self.data_manifest
+            checkpoint["stage7_model_sha256"] = state_dict_sha256(self.state_dict())
+
+    def on_load_checkpoint(self, checkpoint):
+        if self.enforce_data_manifest:
+            verify_manifest(checkpoint.get("stage7_data_manifest"), self.data_manifest)
+            if checkpoint.get("stage7_model_sha256") != state_dict_sha256(checkpoint["state_dict"]):
+                raise ValueError("checkpoint model-state hash mismatch")
+
+    def resolve_normalization_file(self, requested):
+        if not self.enforce_data_manifest:
+            return requested
+        expected_name = "train_data_property_normalization.pt"
+        path = Path(requested) if requested else Path(self.marginal_dists_file).parent / expected_name
+        if sha256_file(path) != self.data_manifest["sha256"][expected_name]:
+            raise ValueError("sampling normalization does not match checkpoint train statistics")
+        return str(path)
+
     def configure_prior(self):
         # load the marginal distributions of atom types, bond orders and the conditional distribution of charges given atom type
         p_a, p_c, p_e, p_c_given_a = torch.load(self.marginal_dists_file)
@@ -637,7 +689,7 @@ class FlowMol(pl.LightningModule):
                 
     def configure_loss_fns(self, device):    
         # instantiate loss functions
-        if self.time_scaled_loss:
+        if self.time_scaled_loss or self.parameterization == "ctmc":
             reduction = 'none'
         else:
             reduction = 'mean'
@@ -684,6 +736,25 @@ class FlowMol(pl.LightningModule):
             reduction=reduction, **e_kwargs, **cat_kwargs
         )
 
+    def reduce_feature_loss(self, feat, unreduced, target, weight):
+        """Shared reduction for CFG/base/MG; legacy checkpoint defaults preserved."""
+        if self.parameterization == "ctmc" and feat in self.n_cat_dict:
+            if target.ndim != 1:
+                raise ValueError("CTMC loss requires hard targets with ignore_index")
+            mode = self.categorical_reduction
+            # Historically time_scaled_loss=False used PyTorch's masked CE mean.
+            if not self.time_scaled_loss and mode == "legacy_factorized":
+                class_weight = self.loss_fn_dict[feat].weight
+                if class_weight is not None:
+                    active = target != -100
+                    denominator = class_weight[target[active]].sum()
+                    return unreduced.sum() / denominator.clamp_min(torch.finfo(unreduced.dtype).tiny)
+                mode = "masked_unweighted"
+            return reduce_categorical_loss(unreduced, weight, target != -100, mode)
+        if self.time_scaled_loss:
+            return reduce_time_scaled_loss_equivalent(unreduced, weight)
+        return unreduced.mean()
+
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
 
         # check if self has the attribute batches_per_epoch
@@ -712,6 +783,8 @@ class FlowMol(pl.LightningModule):
 
         # compute losses
         losses = self(g)
+        if self.correction_config["weight"] > 0:
+            losses.update(correction_losses(self, g))
 
         # create a dictionary of values to log
         train_log_dict = {}
@@ -848,6 +921,10 @@ class FlowMol(pl.LightningModule):
             if loss_key not in losses:
                 raise KeyError(f'enabled auxiliary loss {loss_key!r} is missing')
             total = total + weight * losses[loss_key]
+        for feat in ("x", "s", "e"):
+            key = f"correction_{feat}"
+            if key in losses:
+                total = total + self.correction_config["weight"] * self.total_loss_weights[feat] * losses[key]
         return total
 
     def compute_chemistry_auxiliary_losses(
@@ -869,13 +946,27 @@ class FlowMol(pl.LightningModule):
             graph_weights = 0.5 * (
                 time_weights[:, state_idx] + time_weights[:, edge_idx]
             ).to(vf_output['s'])
-        return self.chemistry_auxiliary_loss(
+        losses = self.chemistry_auxiliary_loss(
             g,
             node_logits=vf_output['s'],
             edge_logits=vf_output['e'],
             upper_edge_mask=upper_edge_mask,
             graph_weights=graph_weights,
         )
+        if any(self.chemistry_loss_weights[key] > 0. for key in (
+            "chem_distribution_valence", "chem_distribution_charge"
+        )):
+            threshold = self.chemistry_auxiliary_config["distribution_min_time"]
+            ramp = ((graph_time - threshold) / (1. - threshold)).clamp(0., 1.)
+            if bool((ramp > 0).any()):
+                losses.update(self.chemistry_auxiliary_loss.distribution_losses(
+                    g, vf_output["s"], vf_output["e"], upper_edge_mask,
+                    graph_weights * ramp,
+                ))
+            else:
+                zero = vf_output["s"].sum() * 0. + vf_output["e"].sum() * 0.
+                losses.update(chem_distribution_valence=zero, chem_distribution_charge=zero)
+        return losses
 
     def _use_self_conditioning(
         self,
@@ -1235,12 +1326,11 @@ class FlowMol(pl.LightningModule):
             target = targets[feat]
             losses[feat] = self.loss_fn_dict[feat](vf_output[feat], target)
 
-            # Preserve the released reduction exactly: coordinates use row-wise weights,
-            # while 1-D CE uses its factorized broadcast-equivalent.
-            if self.time_scaled_loss:
-                losses[feat] = reduce_time_scaled_loss_equivalent(
-                    losses[feat], weight
-                )
+            # Keep row-wise coordinate weighting and the configured categorical
+            # estimator (legacy defaults remain broadcast-equivalent).
+            losses[feat] = self.reduce_feature_loss(
+                feat, losses[feat], target, weight
+            )
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(

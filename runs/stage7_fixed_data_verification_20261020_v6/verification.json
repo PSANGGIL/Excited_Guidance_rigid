@@ -1,0 +1,976 @@
+{
+  "data_before": {
+    "version": 1,
+    "directory": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz",
+    "sha256": {
+      "train_data_processed.pt": "25d523173a825d5ff892ae6e574c69df0c87add67788916ad19a9e545fb4d892",
+      "val_data_processed.pt": "86094c1ada854f1fa4b9378001eaeeeaf9742ed3103eb3cc5270189c1ff5b7b1",
+      "test_data_processed.pt": "a2e1b4991f78132ec5a813ca54fbc44b1c38ce9380b771c621d22e4c346896c9",
+      "train_data_property_normalization.pt": "db8296a53f1b50de84de4511c7f07542f30b52eafee0b63be87a4d1b3ae0c505",
+      "joint_atom_state_metadata.json": "e08a896ed6478f8bb4105abaa463bdd8c6c8a1bfef438e9917441033fdf3b0b7",
+      "train_data_marginal_dists.pt": "0b21b92d9ae6aa191491627fd920e27eeff72ffca7889adf10b2e65b5dbcbe5c",
+      "train_data_joint_state_marginal.pt": "b5325230445cb944157c6646290a6b34cc35547f63daa0459ef1712dd46ac9bb",
+      "train_data_n_atoms_histogram.pt": "e7d09569c02a419bc03b0e452da3170283be7ca3680f4a3f3f94698659ca3385",
+      "conversion_report.json": "b63b7c7866450e9dec2dae6136dc82f2b452d2baf8b4becfe1484fcd88acb78e"
+    }
+  },
+  "stages": [
+    {
+      "config": "00_stage6_control.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 17.01276206970215,
+      "gradient_norm_before_clip": 65.33650207519531,
+      "losses": {
+        "x": 0.1732546091079712,
+        "s": 0.8438982367515564,
+        "e": 0.29358619451522827,
+        "chem_edge_existence": 1.1679974794387817,
+        "chem_valence": 288.4381103515625,
+        "chem_charge": 0.0008003473631106317,
+        "chem_connectivity": 0.0651901513338089,
+        "chem_aromatic": 0.19842544198036194
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.283555269241333,
+          "s": 1.6577306985855103,
+          "e": 0.5993630290031433,
+          "chem_edge_existence": 0.7766227126121521,
+          "chem_valence": 1718.5943603515625,
+          "chem_charge": 0.006536122411489487,
+          "chem_connectivity": 0.16857050359249115,
+          "chem_aromatic": 0.6257730722427368
+        },
+        "0.3/0.95": {
+          "x": 1.0782264471054077,
+          "s": 0.19931229948997498,
+          "e": 0.10595919191837311,
+          "chem_edge_existence": 1.1659111976623535,
+          "chem_valence": 43.30711364746094,
+          "chem_charge": 0.00011070495384046808,
+          "chem_connectivity": 0.04291495680809021,
+          "chem_aromatic": 0.07565697282552719
+        },
+        "0.95/0.3": {
+          "x": 0.019231608137488365,
+          "s": 1.1091338396072388,
+          "e": 0.3592917323112488,
+          "chem_edge_existence": 0.33231157064437866,
+          "chem_valence": 1435.8599853515625,
+          "chem_charge": 0.005886245518922806,
+          "chem_connectivity": 0.10077424347400665,
+          "chem_aromatic": 0.37125444412231445
+        },
+        "0.5/1.0": {
+          "x": 1.28355073928833,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "01_contracts.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 18.61410903930664,
+      "gradient_norm_before_clip": 41.24980163574219,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 5.500260829925537,
+        "e": 1.6539053916931152,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738394737243652,
+          "s": 3.5782527923583984,
+          "e": 1.0493693351745605,
+          "chem_edge_existence": 0.7392477989196777,
+          "chem_valence": 1010.8793334960938,
+          "chem_charge": 0.001744367415085435,
+          "chem_connectivity": 0.21146322786808014,
+          "chem_aromatic": 0.674452543258667
+        },
+        "0.3/0.95": {
+          "x": 1.0694520473480225,
+          "s": 5.384133815765381,
+          "e": 1.5700795650482178,
+          "chem_edge_existence": 1.1099472045898438,
+          "chem_valence": 24.125268936157227,
+          "chem_charge": 2.7735957701224834e-05,
+          "chem_connectivity": 0.031709976494312286,
+          "chem_aromatic": 0.053400587290525436
+        },
+        "0.95/0.3": {
+          "x": 0.019415443763136864,
+          "s": 1.5357029438018799,
+          "e": 0.4496762752532959,
+          "chem_edge_existence": 0.31696873903274536,
+          "chem_valence": 835.28564453125,
+          "chem_charge": 0.0008070711046457291,
+          "chem_connectivity": 0.13491712510585785,
+          "chem_aromatic": 0.4094097316265106
+        },
+        "0.5/1.0": {
+          "x": 1.2738432884216309,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "01a_legacy_loss_control.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 11.127399444580078,
+      "gradient_norm_before_clip": 35.5319709777832,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 0.780442476272583,
+        "e": 0.2704598903656006,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738397121429443,
+          "s": 1.5959134101867676,
+          "e": 0.5294018983840942,
+          "chem_edge_existence": 0.7394112348556519,
+          "chem_valence": 1010.7236328125,
+          "chem_charge": 0.0017505986616015434,
+          "chem_connectivity": 0.21127426624298096,
+          "chem_aromatic": 0.6742188930511475
+        },
+        "0.3/0.95": {
+          "x": 1.0694522857666016,
+          "s": 0.1819206327199936,
+          "e": 0.09063202142715454,
+          "chem_edge_existence": 1.1101971864700317,
+          "chem_valence": 24.121681213378906,
+          "chem_charge": 2.779517490125727e-05,
+          "chem_connectivity": 0.031681567430496216,
+          "chem_aromatic": 0.053342048078775406
+        },
+        "0.95/0.3": {
+          "x": 0.019415467977523804,
+          "s": 1.0896644592285156,
+          "e": 0.31588661670684814,
+          "chem_edge_existence": 0.317038357257843,
+          "chem_valence": 835.1524047851562,
+          "chem_charge": 0.0008101324201561511,
+          "chem_connectivity": 0.1347968429327011,
+          "chem_aromatic": 0.40927213430404663
+        },
+        "0.5/1.0": {
+          "x": 1.2738434076309204,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "01b_unweighted_loss_control.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 15.678085327148438,
+      "gradient_norm_before_clip": 38.87714767456055,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 3.6668407917022705,
+        "e": 1.1026036739349365,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738394737243652,
+          "s": 3.578403949737549,
+          "e": 1.0494120121002197,
+          "chem_edge_existence": 0.7392584085464478,
+          "chem_valence": 1010.83056640625,
+          "chem_charge": 0.0017501700203865767,
+          "chem_connectivity": 0.21145100891590118,
+          "chem_aromatic": 0.674437403678894
+        },
+        "0.3/0.95": {
+          "x": 1.0694520473480225,
+          "s": 3.5896191596984863,
+          "e": 1.0467629432678223,
+          "chem_edge_existence": 1.10996413230896,
+          "chem_valence": 24.124208450317383,
+          "chem_charge": 2.7816704459837638e-05,
+          "chem_connectivity": 0.03170809522271156,
+          "chem_aromatic": 0.05339568108320236
+        },
+        "0.95/0.3": {
+          "x": 0.019415434449911118,
+          "s": 3.583474636077881,
+          "e": 1.049283504486084,
+          "chem_edge_existence": 0.3169729709625244,
+          "chem_valence": 835.2431640625,
+          "chem_charge": 0.0008092174539342523,
+          "chem_connectivity": 0.1349099576473236,
+          "chem_aromatic": 0.4094027876853943
+        },
+        "0.5/1.0": {
+          "x": 1.2738430500030518,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "02_feedback.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 18.61410903930664,
+      "gradient_norm_before_clip": 41.24980163574219,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 5.500260829925537,
+        "e": 1.6539053916931152,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738394737243652,
+          "s": 3.5782527923583984,
+          "e": 1.0493693351745605,
+          "chem_edge_existence": 0.7392477989196777,
+          "chem_valence": 1010.8793334960938,
+          "chem_charge": 0.001744367415085435,
+          "chem_connectivity": 0.21146322786808014,
+          "chem_aromatic": 0.674452543258667
+        },
+        "0.3/0.95": {
+          "x": 1.0694520473480225,
+          "s": 5.384133815765381,
+          "e": 1.5700795650482178,
+          "chem_edge_existence": 1.1099472045898438,
+          "chem_valence": 24.125268936157227,
+          "chem_charge": 2.7735957701224834e-05,
+          "chem_connectivity": 0.031709976494312286,
+          "chem_aromatic": 0.053400587290525436
+        },
+        "0.95/0.3": {
+          "x": 0.019415443763136864,
+          "s": 1.5357029438018799,
+          "e": 0.4496762752532959,
+          "chem_edge_existence": 0.31696873903274536,
+          "chem_valence": 835.28564453125,
+          "chem_charge": 0.0008070711046457291,
+          "chem_connectivity": 0.13491712510585785,
+          "chem_aromatic": 0.4094097316265106
+        },
+        "0.5/1.0": {
+          "x": 1.2738432884216309,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "03_distribution.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.121504783630371,
+      "gradient_norm_before_clip": 10.246352195739746,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 5.500260829925537,
+        "e": 1.6539053916931152,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478,
+        "chem_distribution_valence": 6.568101406097412,
+        "chem_distribution_charge": 0.8474841713905334
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738410234451294,
+          "s": 3.5781195163726807,
+          "e": 1.0480319261550903,
+          "chem_edge_existence": 0.7389218211174011,
+          "chem_valence": 1012.1770629882812,
+          "chem_charge": 0.0016965921968221664,
+          "chem_connectivity": 0.211837500333786,
+          "chem_aromatic": 0.6746714115142822,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694530010223389,
+          "s": 5.38389253616333,
+          "e": 1.5681301355361938,
+          "chem_edge_existence": 1.1094508171081543,
+          "chem_valence": 24.155372619628906,
+          "chem_charge": 2.707187013584189e-05,
+          "chem_connectivity": 0.031766150146722794,
+          "chem_aromatic": 0.053540442138910294,
+          "chem_distribution_valence": 4.018557071685791,
+          "chem_distribution_charge": 0.6365593671798706
+        },
+        "0.95/0.3": {
+          "x": 0.019415682181715965,
+          "s": 1.5356122255325317,
+          "e": 0.4491085410118103,
+          "chem_edge_existence": 0.3168315887451172,
+          "chem_valence": 836.382080078125,
+          "chem_charge": 0.0007963164243847132,
+          "chem_connectivity": 0.13515450060367584,
+          "chem_aromatic": 0.40949323773384094,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738447189331055,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "04_correction.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.737585067749023,
+      "gradient_norm_before_clip": 10.849956512451172,
+      "losses": {
+        "x": 0.17272189259529114,
+        "s": 5.500260829925537,
+        "e": 1.6539053916931152,
+        "chem_edge_existence": 1.1300249099731445,
+        "chem_valence": 172.6485595703125,
+        "chem_charge": 0.00024109246442094445,
+        "chem_connectivity": 0.12908563017845154,
+        "chem_aromatic": 0.290737509727478,
+        "chem_distribution_valence": 6.568101406097412,
+        "chem_distribution_charge": 0.8474841713905334,
+        "correction_x": 0.12992842495441437,
+        "correction_s": 3.6474480628967285,
+        "correction_e": 1.0617804527282715
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738406658172607,
+          "s": 3.5779175758361816,
+          "e": 1.046640157699585,
+          "chem_edge_existence": 0.738545298576355,
+          "chem_valence": 1011.1294555664062,
+          "chem_charge": 0.001687871292233467,
+          "chem_connectivity": 0.2121085673570633,
+          "chem_aromatic": 0.6754540205001831,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694528818130493,
+          "s": 5.3838605880737305,
+          "e": 1.56602942943573,
+          "chem_edge_existence": 1.1088697910308838,
+          "chem_valence": 24.130523681640625,
+          "chem_charge": 2.6975783839588985e-05,
+          "chem_connectivity": 0.03181124106049538,
+          "chem_aromatic": 0.05362274497747421,
+          "chem_distribution_valence": 4.013004779815674,
+          "chem_distribution_charge": 0.6365197896957397
+        },
+        "0.95/0.3": {
+          "x": 0.019415659829974174,
+          "s": 1.5355337858200073,
+          "e": 0.4485146105289459,
+          "chem_edge_existence": 0.31667041778564453,
+          "chem_valence": 835.5219116210938,
+          "chem_charge": 0.0007973576430231333,
+          "chem_connectivity": 0.13532045483589172,
+          "chem_aromatic": 0.41001105308532715,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738447189331055,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "05_dropout.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.741247177124023,
+      "gradient_norm_before_clip": 10.849905967712402,
+      "losses": {
+        "x": 0.1727212369441986,
+        "s": 5.504194259643555,
+        "e": 1.6538310050964355,
+        "chem_edge_existence": 1.1300209760665894,
+        "chem_valence": 172.64093017578125,
+        "chem_charge": 0.00022127653937786818,
+        "chem_connectivity": 0.12913329899311066,
+        "chem_aromatic": 0.29078638553619385,
+        "chem_distribution_valence": 6.567873001098633,
+        "chem_distribution_charge": 0.8471806049346924,
+        "correction_x": 0.12990142405033112,
+        "correction_s": 3.646178960800171,
+        "correction_e": 1.0617988109588623
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738410234451294,
+          "s": 3.5779409408569336,
+          "e": 1.0466426610946655,
+          "chem_edge_existence": 0.7385456562042236,
+          "chem_valence": 1011.1349487304688,
+          "chem_charge": 0.0016870268154889345,
+          "chem_connectivity": 0.21210773289203644,
+          "chem_aromatic": 0.6754517555236816,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694530010223389,
+          "s": 5.383814811706543,
+          "e": 1.5660320520401,
+          "chem_edge_existence": 1.1088701486587524,
+          "chem_valence": 24.13062858581543,
+          "chem_charge": 2.696232513699215e-05,
+          "chem_connectivity": 0.03181114047765732,
+          "chem_aromatic": 0.05362267047166824,
+          "chem_distribution_valence": 4.013011932373047,
+          "chem_distribution_charge": 0.6365203261375427
+        },
+        "0.95/0.3": {
+          "x": 0.019415684044361115,
+          "s": 1.5355409383773804,
+          "e": 0.448515921831131,
+          "chem_edge_existence": 0.31667056679725647,
+          "chem_valence": 835.526611328125,
+          "chem_charge": 0.00079726503463462,
+          "chem_connectivity": 0.1353197991847992,
+          "chem_aromatic": 0.41000932455062866,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738447189331055,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "06_weight_decay.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.741247177124023,
+      "gradient_norm_before_clip": 10.849905967712402,
+      "losses": {
+        "x": 0.1727212369441986,
+        "s": 5.504194259643555,
+        "e": 1.6538310050964355,
+        "chem_edge_existence": 1.1300209760665894,
+        "chem_valence": 172.64093017578125,
+        "chem_charge": 0.00022127653937786818,
+        "chem_connectivity": 0.12913329899311066,
+        "chem_aromatic": 0.29078638553619385,
+        "chem_distribution_valence": 6.567873001098633,
+        "chem_distribution_charge": 0.8471806049346924,
+        "correction_x": 0.12990142405033112,
+        "correction_s": 3.646178960800171,
+        "correction_e": 1.0617988109588623
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738410234451294,
+          "s": 3.5779409408569336,
+          "e": 1.046642780303955,
+          "chem_edge_existence": 0.7385456562042236,
+          "chem_valence": 1011.1349487304688,
+          "chem_charge": 0.0016870268154889345,
+          "chem_connectivity": 0.21210773289203644,
+          "chem_aromatic": 0.6754517555236816,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694530010223389,
+          "s": 5.383814811706543,
+          "e": 1.5660320520401,
+          "chem_edge_existence": 1.1088701486587524,
+          "chem_valence": 24.13062858581543,
+          "chem_charge": 2.696232513699215e-05,
+          "chem_connectivity": 0.03181114047765732,
+          "chem_aromatic": 0.053622666746377945,
+          "chem_distribution_valence": 4.013011932373047,
+          "chem_distribution_charge": 0.6365203261375427
+        },
+        "0.95/0.3": {
+          "x": 0.019415684044361115,
+          "s": 1.5355409383773804,
+          "e": 0.448515921831131,
+          "chem_edge_existence": 0.31667056679725647,
+          "chem_valence": 835.5265502929688,
+          "chem_charge": 0.0007972649182192981,
+          "chem_connectivity": 0.1353197991847992,
+          "chem_aromatic": 0.41000932455062866,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738447189331055,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "07_small_model.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.741247177124023,
+      "gradient_norm_before_clip": 10.849905967712402,
+      "losses": {
+        "x": 0.1727212369441986,
+        "s": 5.504194259643555,
+        "e": 1.6538310050964355,
+        "chem_edge_existence": 1.1300209760665894,
+        "chem_valence": 172.64093017578125,
+        "chem_charge": 0.00022127653937786818,
+        "chem_connectivity": 0.12913329899311066,
+        "chem_aromatic": 0.29078638553619385,
+        "chem_distribution_valence": 6.567873001098633,
+        "chem_distribution_charge": 0.8471806049346924,
+        "correction_x": 0.12990142405033112,
+        "correction_s": 3.646178960800171,
+        "correction_e": 1.0617988109588623
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738410234451294,
+          "s": 3.5779409408569336,
+          "e": 1.0466426610946655,
+          "chem_edge_existence": 0.7385457158088684,
+          "chem_valence": 1011.1349487304688,
+          "chem_charge": 0.0016870268154889345,
+          "chem_connectivity": 0.21210773289203644,
+          "chem_aromatic": 0.6754517555236816,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694530010223389,
+          "s": 5.383814811706543,
+          "e": 1.5660320520401,
+          "chem_edge_existence": 1.1088701486587524,
+          "chem_valence": 24.13062858581543,
+          "chem_charge": 2.696232513699215e-05,
+          "chem_connectivity": 0.03181114047765732,
+          "chem_aromatic": 0.05362267047166824,
+          "chem_distribution_valence": 4.013011932373047,
+          "chem_distribution_charge": 0.6365203261375427
+        },
+        "0.95/0.3": {
+          "x": 0.019415684044361115,
+          "s": 1.5355409383773804,
+          "e": 0.448515921831131,
+          "chem_edge_existence": 0.31667056679725647,
+          "chem_valence": 835.526611328125,
+          "chem_charge": 0.000797264976426959,
+          "chem_connectivity": 0.1353197991847992,
+          "chem_aromatic": 0.41000932455062866,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738447189331055,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    },
+    {
+      "config": "08_condition_scale_control.yaml",
+      "train_indices": [
+        0,
+        6,
+        17,
+        610
+      ],
+      "original_atom_counts": [
+        17,
+        6,
+        31,
+        69
+      ],
+      "loss": 10.733013153076172,
+      "gradient_norm_before_clip": 10.838767051696777,
+      "losses": {
+        "x": 0.1727219521999359,
+        "s": 5.501857757568359,
+        "e": 1.6512093544006348,
+        "chem_edge_existence": 1.1293597221374512,
+        "chem_valence": 172.07582092285156,
+        "chem_charge": 0.0002467083977535367,
+        "chem_connectivity": 0.12939603626728058,
+        "chem_aromatic": 0.29125529527664185,
+        "chem_distribution_valence": 6.557382106781006,
+        "chem_distribution_charge": 0.8472667336463928,
+        "correction_x": 0.12992851436138153,
+        "correction_s": 3.646851062774658,
+        "correction_e": 1.0600366592407227
+      },
+      "validation": {
+        "0.5/0.5": {
+          "x": 1.2738440036773682,
+          "s": 3.5787839889526367,
+          "e": 1.0451034307479858,
+          "chem_edge_existence": 0.7382075786590576,
+          "chem_valence": 1007.922607421875,
+          "chem_charge": 0.0016775056719779968,
+          "chem_connectivity": 0.212539941072464,
+          "chem_aromatic": 0.6767765283584595,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.3/0.95": {
+          "x": 1.0694540739059448,
+          "s": 5.393465995788574,
+          "e": 1.5635554790496826,
+          "chem_edge_existence": 1.108330249786377,
+          "chem_valence": 24.05685043334961,
+          "chem_charge": 2.7828880774904974e-05,
+          "chem_connectivity": 0.03187975659966469,
+          "chem_aromatic": 0.05368221923708916,
+          "chem_distribution_valence": 4.006291389465332,
+          "chem_distribution_charge": 0.6362172365188599
+        },
+        "0.95/0.3": {
+          "x": 0.0194160807877779,
+          "s": 1.5362722873687744,
+          "e": 0.4478445053100586,
+          "chem_edge_existence": 0.3165226876735687,
+          "chem_valence": 832.814208984375,
+          "chem_charge": 0.0008668492082506418,
+          "chem_connectivity": 0.13559776544570923,
+          "chem_aromatic": 0.4109126329421997,
+          "chem_distribution_valence": -0.0,
+          "chem_distribution_charge": -0.0
+        },
+        "0.5/1.0": {
+          "x": 1.2738451957702637,
+          "s": 0.0,
+          "e": 0.0,
+          "chem_edge_existence": 0.0,
+          "chem_valence": 0.0,
+          "chem_charge": 0.0,
+          "chem_connectivity": 0.0,
+          "chem_aromatic": 0.0,
+          "chem_distribution_valence": 0.0,
+          "chem_distribution_charge": 0.0
+        }
+      },
+      "checkpoint_roundtrip": true
+    }
+  ],
+  "production_training_started": false,
+  "feedback_preserves_common_initialization": true,
+  "disposable_untrained_generation": {
+    "requested": 2,
+    "raw_valid_count": 0,
+    "raw_valid_rate": 0.0,
+    "connected_count": 0,
+    "connected_rate": 0.0,
+    "neutral_closed_shell_count": 0,
+    "neutral_closed_shell_rate": 0.0,
+    "eligible_count": 0,
+    "eligible_rate": 0.0,
+    "geometry_evaluable_count": 0,
+    "geometry_evaluable_rate": 0.0,
+    "geometry_screen_count": 0,
+    "geometry_screen_rate": 0.0,
+    "geometry_eligible_count": 0,
+    "geometry_eligible_rate": 0.0,
+    "aromatic_count": 0,
+    "aromatic_rate": 0.0,
+    "topology_screen_count": 0,
+    "topology_screen_rate": 0.0,
+    "aromatic_eligible_rate": 0.0,
+    "geometry_aromatic_eligible_rate": 0.0,
+    "topology_eligible_rate": 0.0,
+    "novel_unique_rate": 0.0,
+    "epoch": 0,
+    "optimizer_step": 1,
+    "seed": 17041,
+    "time_grid_points": 4,
+    "guidance_scale": 1.0,
+    "condition_fidelity_status": "not_measured_requires_external_calculation",
+    "geometry_definition": "unoptimized covalent-radius/planarity screen; not PoseBusters or physical stability",
+    "sampling_path": "diagonal",
+    "data_manifest": {
+      "version": 1,
+      "directory": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz",
+      "sha256": {
+        "train_data_processed.pt": "25d523173a825d5ff892ae6e574c69df0c87add67788916ad19a9e545fb4d892",
+        "val_data_processed.pt": "86094c1ada854f1fa4b9378001eaeeeaf9742ed3103eb3cc5270189c1ff5b7b1",
+        "test_data_processed.pt": "a2e1b4991f78132ec5a813ca54fbc44b1c38ce9380b771c621d22e4c346896c9",
+        "train_data_property_normalization.pt": "db8296a53f1b50de84de4511c7f07542f30b52eafee0b63be87a4d1b3ae0c505",
+        "joint_atom_state_metadata.json": "e08a896ed6478f8bb4105abaa463bdd8c6c8a1bfef438e9917441033fdf3b0b7",
+        "train_data_marginal_dists.pt": "0b21b92d9ae6aa191491627fd920e27eeff72ffca7889adf10b2e65b5dbcbe5c",
+        "train_data_joint_state_marginal.pt": "b5325230445cb944157c6646290a6b34cc35547f63daa0459ef1712dd46ac9bb",
+        "train_data_n_atoms_histogram.pt": "e7d09569c02a419bc03b0e452da3170283be7ca3680f4a3f3f94698659ca3385",
+        "conversion_report.json": "b63b7c7866450e9dec2dae6136dc82f2b452d2baf8b4becfe1484fcd88acb78e"
+      }
+    },
+    "model_state_sha256": "7dfc72a31f28dc33decc2360e29dd8f560a19ebb76dc09cf5e96a3f8204d83b6",
+    "sdf_definition": "unrepaired RDKit-valid outputs only; invalid endpoint tensors preserved in raw_states.pt",
+    "raw_sdf_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "records": [
+      {
+        "raw_valid": false,
+        "connected": false,
+        "neutral_closed_shell": false,
+        "aromatic": false,
+        "topology_screen": false,
+        "geometry_screen": false,
+        "eligible": false,
+        "geometry_evaluable": false,
+        "geometry_eligible": false,
+        "smiles": null,
+        "error": "AtomValenceException: Explicit valence for atom # 0 S, 44, is greater than permitted",
+        "heavy_atoms": 52,
+        "bonds": 1098,
+        "generation_index": 0,
+        "target_est_eV": 0.2910001277923584,
+        "requested_heavy_atoms": 46,
+        "validation_index": 123,
+        "heavy_atom_count_error": 6,
+        "heavy_atom_retention": 1.1304347826086956,
+        "novel_unique": false
+      },
+      {
+        "raw_valid": false,
+        "connected": false,
+        "neutral_closed_shell": false,
+        "aromatic": false,
+        "topology_screen": false,
+        "geometry_screen": false,
+        "eligible": false,
+        "geometry_evaluable": false,
+        "geometry_eligible": false,
+        "smiles": null,
+        "error": "AtomValenceException: Explicit valence for atom # 0 S, 24, is greater than permitted",
+        "heavy_atoms": 33,
+        "bonds": 441,
+        "generation_index": 1,
+        "target_est_eV": 0.7239999771118164,
+        "requested_heavy_atoms": 28,
+        "validation_index": 109,
+        "heavy_atom_count_error": 5,
+        "heavy_atom_retention": 1.1785714285714286,
+        "novel_unique": false
+      }
+    ]
+  },
+  "lightning_one_step_and_quality_checkpoint": true,
+  "full_width_forward_backward": {
+    "parameters": 7987522,
+    "loss": 9.66590690612793,
+    "graph_count": 4,
+    "total_slots": 148
+  },
+  "codec_identity": {
+    "train": 1264,
+    "val": 158,
+    "test": 159
+  },
+  "data_unchanged": true
+}

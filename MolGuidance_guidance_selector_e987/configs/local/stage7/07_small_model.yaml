@@ -1,0 +1,11 @@
+_base_: 06_weight_decay.yaml
+# Capacity ablation only. Do not compare checkpoints by raw epoch count.
+vector_field:
+  n_hidden_scalars: 128
+  n_hidden_edge_feats: 64
+  n_molecule_updates: 4
+training:
+  output_dir: ../runs/molguidance_stage7_07_small_model
+wandb:
+  name: hp1kg-est-stage7-07-small-model
+  save_dir: ../runs/molguidance_stage7_07_small_model

@@ -9,7 +9,6 @@ from molguidance.data_processing.utils import get_batch_idxs, get_upper_edge_mas
 from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.models.ctmc_vector_field import CTMCVectorField, PROPERTY_MAP
 from molguidance.models.classifier_free_guidance import ZerosEmbedding
-from molguidance.models.loss_utils import reduce_time_scaled_loss_equivalent
 import copy
 import numpy as np
 import random
@@ -56,6 +55,8 @@ class ModelGuidance(FlowMol):
                  use_scale_aware: bool = True,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        if self.correction_config["weight"] > 0:
+            raise NotImplementedError("Stage 7 correction is validated for base/CFG, not MG targets")
         
         self.min_scale = min_scale
         self.max_scale = max_scale
@@ -67,6 +68,12 @@ class ModelGuidance(FlowMol):
         self.use_scale_aware = use_scale_aware
 
         vector_field_config = dict(kwargs.get("vector_field_config", {}))
+        if vector_field_config.get("condition_residual_scale", 1.) != 1.:
+            raise NotImplementedError(
+                "Stage 7 condition-residual ablation is validated for CFG, not scale-aware MG"
+            )
+        if vector_field_config.get("chemistry_feedback", False):
+            vector_field_config["chemistry_state_metadata"] = self.atom_state_vocab
         vector_field_config['independent_modality_time'] = (
             self.independent_modality_time
         )
@@ -421,11 +428,10 @@ class ModelGuidance(FlowMol):
             target = targets[feat]
             losses[feat] = self.loss_fn_dict[feat](vf_output[feat], target)
 
-            # Preserve the released reduction without a quadratic CE temporary.
-            if self.time_scaled_loss:
-                losses[feat] = reduce_time_scaled_loss_equivalent(
-                    losses[feat], weight
-                )
+            # Shared explicit reduction; legacy defaults retain the released loss.
+            losses[feat] = self.reduce_feature_loss(
+                feat, losses[feat], target, weight
+            )
 
         losses.update(
             self.compute_chemistry_auxiliary_losses(

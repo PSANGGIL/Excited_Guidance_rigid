@@ -125,7 +125,7 @@ def align_prior(prior_feat: torch.Tensor, dst_feat: torch.Tensor, permutation=Fa
 
     return prior_feat
 
-def rigid_alignment(x_0, x_1, pre_centered=False):
+def rigid_alignment(x_0, x_1, pre_centered=False, allow_reflection=True):
     """
     See: https://en.wikipedia.org/wiki/Kabsch_algorithm
     Alignment of two point clouds using the Kabsch algorithm.
@@ -136,8 +136,8 @@ def rigid_alignment(x_0, x_1, pre_centered=False):
 
     # remove COM from data and record initial COM
     if pre_centered:
-        x_0_mean = torch.zeros(1, d)
-        x_1_mean = torch.zeros(1, d)
+        x_0_mean = x_0.new_zeros(1, d)
+        x_1_mean = x_1.new_zeros(1, d)
         x_0_c = x_0
         x_1_c = x_1
     else:
@@ -151,22 +151,12 @@ def rigid_alignment(x_0, x_1, pre_centered=False):
     U, S, V = torch.svd(H)
     # Rotation matrix
     R = V.mm(U.T)
-    # Translation vector
-    if pre_centered:
-        t = torch.zeros(1, d)
-    else:
-        t = x_1_mean - R.mm(x_0_mean.T).T # has shape (1, D)
-
-    # apply rotation to x_0_c
-    x_0_aligned = x_0_c.mm(R.T)
-
-    # move x_0_aligned to its original frame
-    x_0_aligned = x_0_aligned + x_0_mean
-
-    # apply the translation
-    x_0_aligned = x_0_aligned + t
-
-    return x_0_aligned
+    if not allow_reflection:
+        correction = torch.ones(d, device=x_0.device, dtype=x_0.dtype)
+        correction[-1] = torch.where(torch.linalg.det(R) < 0, -1.0, 1.0)
+        R = (V * correction.unsqueeze(0)).mm(U.T)
+    # x_0_c is already centered; re-add the TARGET center only.
+    return x_0_c.mm(R.T) + x_1_mean
 
 def batched_rigid_alignment(x_0, x_1, pre_centered=False):
     """

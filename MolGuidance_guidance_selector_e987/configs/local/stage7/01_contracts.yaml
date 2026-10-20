@@ -1,0 +1,23 @@
+_base_: ../guidance_est/hp1kg_est_cfg_joint_kekule_stage6_independent_time_bond_first.yaml
+# Fixed HP1KG splits and official XYZ. Fresh training, not resume from Stage 6.
+# Independent training times regularize denoising; reverse path is explicitly
+# diagonal, NOT a claimed graph-first 2-D solver.
+mol_fm:
+  categorical_reduction: masked_weighted
+  enforce_data_manifest: true
+vector_field:
+  n_cp_feats: 0  # Full O(3), consistent with reflection-allowing prior alignment.
+  dropout: 0.0
+training:
+  output_dir: ../runs/molguidance_stage7_01_contracts
+  evaluation:
+    generation:
+      enabled: true
+      every_n_epochs: 50
+      n_samples: 64
+      batch_size: 8
+      n_timesteps: 100
+      seed: 17041
+wandb:
+  name: hp1kg-est-stage7-01-contracts
+  save_dir: ../runs/molguidance_stage7_01_contracts

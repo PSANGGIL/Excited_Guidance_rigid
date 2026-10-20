@@ -1,0 +1,14 @@
+_base_: 03_distribution.yaml
+mol_fm:
+  correction:
+    weight: 0.1
+    probability: 0.25
+    time: 0.85
+    node_rate: 0.1
+    edge_rate: 0.02
+    coordinate_std: 0.1
+training:
+  output_dir: ../runs/molguidance_stage7_04_correction
+wandb:
+  name: hp1kg-est-stage7-04-correction
+  save_dir: ../runs/molguidance_stage7_04_correction

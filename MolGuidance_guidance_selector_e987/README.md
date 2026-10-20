@@ -1,4 +1,14 @@
 # MolGuidance
+
+## Local HP1KG Stage 7 — fixed-data consistency experiment
+
+새 브랜치 `feature/molguidance-stage7-fixed-data-consistency`에서 HP1KG 1,581개와
+공식 XYZ/EST/split을 변경하지 않고, 원자–결합 feedback, 분포 기반 호환성,
+별도 correction 학습, dropout 및 엄격한 생성 평가를 단계별 옵션으로 추가했습니다.
+변경 순서·수식·회귀 테스트·미해결 한계는
+[Stage 7 구현 및 검증 기록](docs/STAGE7_FIXED_DATA_CONSISTENCY.md)을 참고하십시오.
+장기학습/성능 개선을 완료했다는 의미는 아닙니다. 기존 checkpoint와 결과는 보존합니다.
+
 [![arXiv](https://img.shields.io/badge/arXiv-1234.56789-b31b1b.svg?style=flat)](https://arxiv.org/pdf/2512.12198)
 
 The paper at JCIM: [*"Molguidance: Advanced Guidance Strategies for Conditional Molecular Generation with Flow Matching"*](https://pubs.acs.org/doi/10.1021/acs.jcim.6c00964). 

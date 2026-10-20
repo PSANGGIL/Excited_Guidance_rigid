@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from molguidance.data_processing.utils import get_batch_idxs
+from molguidance.models.chemistry_distribution import compatibility_probabilities
 
 
 def _weighted_mean(
@@ -374,3 +375,28 @@ class JointChemistryAuxiliaryLoss(nn.Module):
         if not all(bool(torch.isfinite(value)) for value in losses.values()):
             raise FloatingPointError("non-finite chemistry auxiliary loss")
         return losses
+
+    def distribution_losses(self, g, node_logits, edge_logits, upper_edge_mask, graph_weights):
+        node, edge, _ = self._effective_endpoint_probabilities(
+            g, node_logits, edge_logits, upper_edge_mask
+        )
+        node_batch, _ = get_batch_idxs(g)
+        true_charge = node.new_zeros(g.batch_size)
+        true_charge.index_add_(
+            0, node_batch, g.ndata["s_1_true"].to(node) @ self.state_charges
+        )
+        local, global_ = compatibility_probabilities(
+            g, node, edge, upper_edge_mask,
+            self.state_valence_probabilities > 0,
+            self.state_charges, true_charge,
+        )
+        def nll(probability):
+            # Smooth floor: finite gradients even for near-impossible endpoints.
+            return -torch.log(probability.clamp(0., 1.) * (1. - self.eps) + self.eps)
+        supported = node[:, self.state_support].sum(-1) > self.eps
+        return {
+            "chem_distribution_valence": _weighted_mean(
+                nll(local), graph_weights[node_batch], supported
+            ),
+            "chem_distribution_charge": _weighted_mean(nll(global_), graph_weights),
+        }

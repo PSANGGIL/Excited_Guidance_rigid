@@ -16,8 +16,9 @@ from molguidance.models.classifier_free_guidance import ClassifierFreeGuidance
 from molguidance.models.model_guidance_scale import ModelGuidance
 from molguidance.data_processing.data_module import MoleculeDataModule
 from molguidance.model_utils.sweep_config import merge_config_and_args, register_hyperparameter_args
-from molguidance.model_utils.load import read_config_file, data_module_from_config
+from molguidance.model_utils.load import read_config_file, data_module_from_config, resolve_training_resume
 from molguidance.model_utils.load_with_guidance import model_from_config_with_guidance
+from molguidance.analysis.generation_callback import GenerationValidation, GeneratedQualityCheckpoint
 
 def parse_args():
     p = argparse.ArgumentParser(description='Training Script')
@@ -46,20 +47,9 @@ if __name__ == "__main__":
 
     wandb.init(project="mol-fm")
 
-    # TODO: implement resuming
     if args.resume is not None:
-        # determine if we are resuming from a run directory or a checkpoint file
-        if args.resume.is_dir():
-            # we are resuming from a run directory
-            # get the config file from the run directory
-            run_dir = args.resume
-            ckpt_file = str(run_dir / 'checkpoints' / 'last.ckpt')
-        elif args.resume.is_file():
-            run_dir = args.resume.parent.parent
-            ckpt_file = str(args.resume)
-        else:
-            raise ValueError('resume argument must be a run directory or a checkpoint file that must already exist')
-        
+        run_dir, resume_checkpoint = resolve_training_resume(args.resume)
+        ckpt_file = str(resume_checkpoint)
         config_file = run_dir / 'config.yaml'
     else:
         config_file = args.config
@@ -153,7 +143,24 @@ if __name__ == "__main__":
         refresh_rate = 20
     pbar_callback = TQDMProgressBar(refresh_rate=refresh_rate)
 
-    trainer = pl.Trainer(logger=wandb_logger, **trainer_config, callbacks=[checkpoint_callback, pbar_callback])
+    callbacks = [checkpoint_callback, pbar_callback]
+    generation_eval = dict(config['training']['evaluation'].get('generation', {}))
+    if generation_eval.pop('enabled', False):
+        generation_callback = GenerationValidation(
+            output_dir=run_dir / 'generation_validation',
+            data_dir=config['dataset']['processed_data_dir'],
+            **generation_eval,
+        )
+        callbacks.append(generation_callback)
+        # Separate geometry-screen checkpoint; never call this EST fidelity.
+        callbacks.append(GeneratedQualityCheckpoint(
+            dirpath=str(checkpoints_dir / 'generation_quality'),
+            monitor='gen_geometry_eligible_rate', mode='max', save_top_k=3,
+            every_n_epochs=generation_callback.every_n_epochs,
+            save_on_train_epoch_end=False, auto_insert_metric_name=False,
+            filename='epoch{epoch:04d}-geometry{gen_geometry_eligible_rate:.4f}',
+        ))
+    trainer = pl.Trainer(logger=wandb_logger, **trainer_config, callbacks=callbacks)
 
     # train
     trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_file)

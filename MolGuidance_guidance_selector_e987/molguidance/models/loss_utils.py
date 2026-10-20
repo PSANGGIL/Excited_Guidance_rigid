@@ -1,8 +1,48 @@
-"""Loss reductions that preserve the released model's scalar objective."""
+"""Explicit categorical estimators and a released-objective compatibility mode."""
 
 from __future__ import annotations
 
 import torch
+
+
+CATEGORICAL_REDUCTIONS = {
+    "legacy_factorized", "aligned_all", "masked_weighted", "masked_unweighted"
+}
+
+
+def reduce_categorical_loss(loss, weight, active, mode="masked_weighted"):
+    """Explicit categorical estimators; never infer masks from zero losses.
+
+    masked_weighted = sum(active * weight * CE) / count(active), NOT / sum(weight).
+    aligned_all includes ignored entries in the denominator. The legacy mode
+    intentionally preserves the released outer-product objective for ablation.
+    Empty masks return a differentiable zero, including at clean graph time.
+    """
+    if mode not in CATEGORICAL_REDUCTIONS:
+        raise ValueError(f"unknown categorical reduction: {mode}")
+    if loss.ndim != 1 or active.shape != loss.shape or active.dtype != torch.bool:
+        raise ValueError("loss and active must be aligned vectors")
+    weight = torch.as_tensor(weight, device=loss.device, dtype=loss.dtype)
+    if weight.ndim == 0:
+        weight = weight.expand_as(loss)
+    elif weight.shape == (loss.numel(), 1):
+        weight = weight[:, 0]
+    if weight.shape != loss.shape:
+        raise ValueError("categorical weights must align with loss entries")
+    if not torch.isfinite(weight).all() or bool((weight < 0).any()):
+        raise ValueError("categorical weights must be finite and non-negative")
+    masked = torch.where(active, loss, torch.zeros_like(loss))
+    if mode == "legacy_factorized":
+        return masked.sum() / max(loss.numel(), 1) * (
+            weight.sum() / max(loss.numel(), 1)
+        )
+    denominator = (
+        loss.new_tensor(max(loss.numel(), 1))
+        if mode == "aligned_all" else active.sum().clamp_min(1)
+    )
+    if mode == "masked_unweighted":
+        return masked.sum() / denominator
+    return (masked * weight).sum() / denominator
 
 
 def reduce_time_scaled_loss_equivalent(

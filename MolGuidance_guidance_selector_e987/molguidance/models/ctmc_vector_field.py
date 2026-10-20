@@ -43,6 +43,7 @@ class CTMCVectorField(EndpointVectorField):
                  property_embedder=None,
                  properties_handle_method:str=None,
                  dataset_name:str = "qm9",
+                 condition_residual_scale: float = 1.0,
                  **kwargs):
         super().__init__(*args, has_mask=True, **kwargs) # initialize endpoint vector field
         self.property_embedding_dim = property_embedding_dim
@@ -50,6 +51,11 @@ class CTMCVectorField(EndpointVectorField):
         self.conditional_generation = conditional_generation    
         self.property_embedder = property_embedder
         self.properties_handle_method = properties_handle_method
+        self.condition_residual_scale = float(condition_residual_scale)
+        if not torch.isfinite(torch.tensor(self.condition_residual_scale)) or self.condition_residual_scale < 0:
+            raise ValueError("condition_residual_scale must be finite and non-negative")
+        if self.condition_residual_scale != 1. and properties_handle_method != "concatenate_sum":
+            raise ValueError("condition_residual_scale is defined only for concatenate_sum")
 
         self.eta = stochasticity # default stochasticity parameter, 0 means no stochasticity
         self.hc_thresh = high_confidence_threshold # the threshold for for calling a prediction high-confidence, 0 means no purity sampling
@@ -690,7 +696,7 @@ class CTMCVectorField(EndpointVectorField):
                     if self.properties_handle_method == 'concatenate_sum':
                         intermediate_features = torch.cat([node_scalar_features, prop_emb], dim=-1)
                         intermediate_features = self.scalar_embedding_cond(intermediate_features)
-                        node_scalar_features = node_scalar_features + intermediate_features
+                        node_scalar_features = node_scalar_features + self.condition_residual_scale * intermediate_features
                     elif self.properties_handle_method == 'concatenate':
                         intermediate_features = torch.cat([node_scalar_features, prop_emb], dim=-1)
                         node_scalar_features = self.scalar_embedding_cond(intermediate_features)

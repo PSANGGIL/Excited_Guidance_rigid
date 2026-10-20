@@ -1,0 +1,19 @@
+_base_: ../guidance_est/hp1kg_est_cfg_joint_kekule_stage6_independent_time_bond_first.yaml
+# From-scratch legacy architecture/objective control with the SAME new evaluator.
+# n_cp_feats=4 and legacy categorical reduction are deliberately retained here.
+# This is a comparison control, not the recommended symmetry contract.
+mol_fm:
+  enforce_data_manifest: true
+training:
+  output_dir: ../runs/molguidance_stage7_00_stage6_control
+  evaluation:
+    generation:
+      enabled: true
+      every_n_epochs: 50
+      n_samples: 64
+      batch_size: 8
+      n_timesteps: 100
+      seed: 17041
+wandb:
+  name: hp1kg-est-stage7-00-stage6-control
+  save_dir: ../runs/molguidance_stage7_00_stage6_control

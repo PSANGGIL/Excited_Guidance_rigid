@@ -5,11 +5,55 @@ import math
 import yaml
 from molguidance.data_processing.data_module import MoleculeDataModule
 
-def read_config_file(config_file: Path) -> dict:
-    # process config file into dictionary
-    with open(config_file, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-    return config
+def read_config_file(config_file: Path, _seen=None) -> dict:
+    """Resolve explicit relative _base_ configs for reproducible ablations.
+
+    The trainer saves the fully expanded result, so checkpoints do not depend
+    on future edits to parent YAML files. Cycles and non-mapping files fail.
+    """
+    path = Path(config_file).resolve()
+    seen = set() if _seen is None else set(_seen)
+    if path in seen:
+        raise ValueError(f"cyclic config inheritance: {path}")
+    seen.add(path)
+    with path.open() as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict):
+        raise ValueError(f"config must be a mapping: {path}")
+    parent = config.pop("_base_", None)
+    if parent is None:
+        return config
+    base = read_config_file(path.parent / parent, seen)
+    def merge(dst, src):
+        for key, value in src.items():
+            if isinstance(value, dict) and isinstance(dst.get(key), dict):
+                merge(dst[key], value)
+            else:
+                dst[key] = value
+        return dst
+    return merge(base, config)
+
+
+def resolve_training_resume(resume: Path) -> tuple[Path, Path]:
+    """Resolve ordinary AND nested generation-quality checkpoints."""
+    resume = Path(resume).resolve()
+    if resume.is_dir():
+        run_dir = resume
+        checkpoint = run_dir / "checkpoints" / "last.ckpt"
+    elif resume.is_file():
+        checkpoint = resume
+        run_dir = next(
+            (parent for parent in checkpoint.parents if (parent / "config.yaml").is_file()),
+            None,
+        )
+        if run_dir is None:
+            raise ValueError("resume checkpoint has no parent run/config.yaml")
+    else:
+        raise ValueError("resume must be an existing run directory or checkpoint")
+    if not (run_dir / "config.yaml").is_file() or not checkpoint.is_file():
+        raise ValueError("resume requires both a saved config.yaml and checkpoint")
+    return run_dir, checkpoint
+
 
 def validate_chemistry_schema(config: dict) -> None:
     """Fail before training when dataset/model categorical widths disagree."""
@@ -126,7 +170,7 @@ def validate_chemistry_schema(config: dict) -> None:
 
     chemistry_config = model.get('chemistry_auxiliary', {})
     chemistry_enabled = any(
-        float(value) > 0.0 for value in chemistry_config.values()
+        float(value) > 0.0 for key, value in chemistry_config.items() if key.endswith("_weight")
     )
     if chemistry_enabled:
         if not dataset.get('require_chemistry_auxiliary_labels', False):
