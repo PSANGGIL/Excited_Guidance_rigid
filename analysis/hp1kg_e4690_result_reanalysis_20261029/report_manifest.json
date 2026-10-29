@@ -1,0 +1,25 @@
+{
+  "created_utc": "2026-10-29T03:59:02.520689+00:00",
+  "direct_input_sha256": {
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/reanalyze_hp1kg_e4690_20261029.py": "299f709857edd6c62e709f3bcfb310ea9ede2b2da89d2954a640aef39c7171cd",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_deep_diagnostics_20261028_verified/endpoint_molecule_diagnostics_1000.csv": "8db368fff25cabf447b33bf4ced0898619cfd837555d6e261dd61b3ffa0bc3bf",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/all_1000_structure_energy.csv": "f1f226301dcad08e0dde05f9fc65ad6b923662005918855acc7a119c02a3eaf2"
+  },
+  "output_sha256": {
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/ERRATA_previous_reports.txt": "d976c323074cb351ce58123547fbfd403213c3be9362c8800a3e4a4686a8e599",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/analysis_script.py": "299f709857edd6c62e709f3bcfb310ea9ede2b2da89d2954a640aef39c7171cd",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/corrected_aromatic_plane_cases.csv": "7a4577d7b116ede70118fc156f57bb6bea9b32e638c02f8a43607af3d0100fb0",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/geometry_recheck_452.csv": "8fea42437a83da9c55037f2c601b32ecd68069be0788b67c93ae31223f644971",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/near_zero_only_5_6_rings_12_rdkit2d.png": "b46015873df73c176369fa0c9916a3b38fc4a05ba984eba359b555d312433525",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/reanalysis_overview.pdf": "2bc4c03858053702b70cd6d77b0674cc2c2093ef6b2b850ef637c7020751ba40",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/reanalysis_overview.png": "42469b58a2acc9bb93885497b80034889d80bc8524c26f420fe9c67e1355908c",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/reanalysis_report_ko.txt": "55039833910a2b335598954e45b3dd632677730b7ade99d71647081493782ea8",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/rechecked_success_452.csv": "1bf4b7340f3c8e4cd7a00fdac7dffbb57b60d4b21bf780bbc52ffbe2d18c28ce",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/ring_group_comparison.csv": "319c1481979049a7d88e7dd22a4098331814522e1acb1713c5e5a6047832b3f2",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/status.json": "023606cd05d92f24adc8c2a3db8105191d0597eb54303acc9352d56c76d69c12",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/summary.json": "6b42f63787150f3aa98e4df49c88e55a7345dcd229940426961398c0934ebf05",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/target_hits_34.csv": "fd4c0f2d4ac5ee59de7b8e1ac2dd6ca821d452513d3acf254e98cb4f50eea016",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/target_hits_only56_12.csv": "a716bc29ce6c6f3da8f43ecf16f5b32bc2d2ab2b157848c71c776895ead5f7ae"
+  },
+  "validation": "452 geometry audits and 904 state logs rechecked; all 12 drawn candidates are unique DB-novel near-target graphs with only 5/6 rings."
+}

@@ -12,6 +12,17 @@ Kekulé 표현 증강, MG soft target/EMA, 실제 edge-budget batching, correcti
 [Stage 8 수식·구현·검증·실행 기록](docs/STAGE8_JOINT_CONSISTENCY_20261020.md)을
 참고하십시오. 원본 DB와 이전 checkpoint/생성/XTB 결과는 변경하지 않았습니다.
 
+2026-10-29 현재 코드 스냅샷은 `c8af84d`이며 CPU 회귀 테스트 **130개**를
+통과했습니다. e4690 생성 당시 모델 소스 64개와 현재 소스의 해시가 일치합니다.
+[구조 실패·다양성·평가 한계 리포트](docs/STRUCTURE_FAILURE_REPORT_20261029.txt)에
+1,000개 생성의 원자가 실패, 고리 구성 편향, 좌표 경고, 최종 solver의
+support/count 충돌과 미해결 항목을 정리했습니다. 우선 평가 목표는 합리적인
+다양한 구조의 생성이며 XTB/sTDA는 조건 반영을 보는 보조 지표입니다.
+이전 보고서의 #830 O–O 결합 오기, nitro 형식전하 해석, 방향족 평면성
+평가 정정도 포함합니다. 이번 기록은 구조 문제가 해결됐다는 선언이 아닙니다.
+[최신 재분석 및 RDKit 2D](../analysis/hp1kg_e4690_result_reanalysis_20261029/)
+결과를 함께 보십시오.
+
 ## Local HP1KG Stage 7 — fixed-data consistency experiment
 
 새 브랜치 `feature/molguidance-stage7-fixed-data-consistency`에서 HP1KG 1,581개와

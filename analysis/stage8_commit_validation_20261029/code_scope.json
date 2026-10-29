@@ -1,0 +1,306 @@
+{
+  "files": [
+    {
+      "path": "MolGuidance_guidance_selector_e987/README.md",
+      "bytes": 22964,
+      "sha256": "ff76bbde9e80d8fe4901a9596f2d9f82287119aa90a417ed6c9913697cb05cfd"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/00_control.yaml",
+      "bytes": 504,
+      "sha256": "8bb1e628ffebeff179695ef4a44ed77da8eaf9a8c3a3752c924b4804e9301f70"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/01_distribution.yaml",
+      "bytes": 378,
+      "sha256": "b75dccb7c507b6c770c484fd0fc5f6d10bf0356573944deed88eca1f0ac4b89c"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/01a_kekule_augmentation.yaml",
+      "bytes": 266,
+      "sha256": "c07f349220a4b2df568716a5a6d5ceec1960e5acbb5d9dcf5c51c42b0448749f"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/02_correction.yaml",
+      "bytes": 560,
+      "sha256": "9ed38628785e41da220ca5bca472236a0256d4ca8280ab48bbcf163deccea5d2"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/03_dropout.yaml",
+      "bytes": 212,
+      "sha256": "2960c7ce5cf9a7a453d3f88ee29a6dd818e56966a7d6112256d88d67e2d93e82"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/04_weight_decay.yaml",
+      "bytes": 232,
+      "sha256": "0c1d14e3f73f79e718bb871e75226f14bfb8c8b3fc08b1f5d38d17e4c02c7351"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/05_small_model.yaml",
+      "bytes": 284,
+      "sha256": "c291de51e2271614952f85f54f8b4529999129b5002983c913aa966c434e5c52"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/06_condition_scale.yaml",
+      "bytes": 252,
+      "sha256": "c4f5f04e8d30e15b4414579f9e45245bc110783ed5e5391b21b32e47ef2f4330"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/07_mg.yaml",
+      "bytes": 359,
+      "sha256": "c55531555cc77bc7af0d0f13162a28b00b6de5730f75be2ed92749521f6f5f19"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/configs/local/stage8/08_longtrain_cfg.yaml",
+      "bytes": 485,
+      "sha256": "a9a66d04801e290a6e594252e1c3b540360ff49ea515a2a8b1b12fbc382a3b7b"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/docs/STAGE8_JOINT_CONSISTENCY_20261020.md",
+      "bytes": 16395,
+      "sha256": "0802ba5d5c8c4a33616d037c3723164fbda3da6d58f50a06859c66edf116cb46"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/analysis/generation_callback.py",
+      "bytes": 15869,
+      "sha256": "c67880b7a44d726165d2677123058ba520bf44f7904b8bf53647705c20fdb634"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/analysis/joint_decode.py",
+      "bytes": 13111,
+      "sha256": "dc94a6da7c81b0e7475601cd010c390655afc734f13824b0ee620ec9f7f9fbf8"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/data_processing/data_module.py",
+      "bytes": 3787,
+      "sha256": "dbcc68c93cc104ff3ca7754040fd3cfc27d538d6884d062b09b9812364a00ccd"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/data_processing/dataset.py",
+      "bytes": 21769,
+      "sha256": "9829ac9daa50ab1b669711b9d996a48610c08e6e3bb5972be53659f1f87540d1"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/data_processing/edge_budget.py",
+      "bytes": 3334,
+      "sha256": "81e45791444c6f715d4863a188b5b98d3f033d02fe6c76768d118788faac5b4f"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/data_processing/kekule_augmentation.py",
+      "bytes": 4170,
+      "sha256": "fb3ebade460bdcee550d99852e0d648f396e12cb0bd9f02f51acd4ecdb3b3899"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/model_utils/load.py",
+      "bytes": 13464,
+      "sha256": "4c4c922de213c05a0094bc1a12823ea88b5a2a1ec6a4a528556bfbce4e2f9b52"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/chemistry_auxiliary.py",
+      "bytes": 18143,
+      "sha256": "05349e6d5c443a260c61617e7c1d378365bb2bc4a5ebcf5269a806c2a06665da"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/classifier_free_guidance.py",
+      "bytes": 49348,
+      "sha256": "dd726321739e4fe99d38bc4a927166e10f0e2ea41411aabfbbf8da5869d9419b"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/correction.py",
+      "bytes": 6618,
+      "sha256": "adbb9e32a9347dfa4fe4a5c7000149e267419d46ad6426e3db8b1991e9ef3695"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/flowmol.py",
+      "bytes": 78567,
+      "sha256": "0169b6096ffdd48d8b9053cb1d93d2bbc4f55a2aa6876b6442f917364e83e524"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/mask_ctmc.py",
+      "bytes": 2088,
+      "sha256": "d7855e78be69c0264cdca4805072f2c4b729a36f6b212edc4d23942abf90c3fd"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/mg_targets.py",
+      "bytes": 2008,
+      "sha256": "dbc7fc1b3b9ca32fa523c5c5cbecfac8a2084d18b3f21411974cc1f06a35a3c1"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/molguidance/models/model_guidance_scale.py",
+      "bytes": 55408,
+      "sha256": "63e3491d0ac3f4c6d86c58b14d6fa92bd445e5c0dccbecec70f4d5fb5422fbef"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_ema_edge_offset.py",
+      "bytes": 2363,
+      "sha256": "b6d07feac396ae742a4bcbb11e99a042757bedae891bcd6d74b7bacf8f1d5b13"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_joint_chemistry_auxiliary.py",
+      "bytes": 18089,
+      "sha256": "f83d94288b05a1a8bf0f1b398606d444b6650dbdcd40239463366dab555b55f8"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_linear_energy_condition.py",
+      "bytes": 2485,
+      "sha256": "bc24be742cbfae2c9dab57b170a11939fbd03c06297486a5a3e1ba1609afa93b"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_budget.py",
+      "bytes": 1610,
+      "sha256": "e718bbb64b7278aab820efd578f9e4c34a9accb887379d39806386118a993ed1"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_generation_xtb.py",
+      "bytes": 6493,
+      "sha256": "74cb371f24a4170ed4cd445846eace74e0bc9f8af27d449eeb143772c35b012f"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_joint_decode.py",
+      "bytes": 5598,
+      "sha256": "e33550a262a5b10e38e5e10e8ab1de7717457b866c02aeb9868923b1cb8568b0"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_kernels.py",
+      "bytes": 5164,
+      "sha256": "c71d9ce450ccc766092cd1fec49a7f7cf2f4a2c24fc55e43fe07a45a5a56a390"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_mg.py",
+      "bytes": 5388,
+      "sha256": "29ac2f91ffee8781506bfa269e819e09df5dc342da63f38f4d211742d29e9f1f"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_resume_safety.py",
+      "bytes": 3938,
+      "sha256": "419c96a699c34d5fa37576cfb8783e688a24b7ac28c76c2ea937d33f5237ea42"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tests/test_stage8_xtb_targets.py",
+      "bytes": 5284,
+      "sha256": "3a044df89054c9e517fdc5d3ec61def0c86c523369578d244dfeec853a43a3d8"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/audit_stage8_panel.py",
+      "bytes": 8357,
+      "sha256": "ccda52feef68394955018ab8a401497e282f5d8d8b3d5600b862a5acb4b90b4a"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/calibrate_generation_geometry.py",
+      "bytes": 2684,
+      "sha256": "f516d09a93525bf41a73996b6121fe99a870a33bb1561f9a3fb29bb840df03a4"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/diagnose_stage8_joint_failures.py",
+      "bytes": 4746,
+      "sha256": "93118c1150623782d07513438a69f9964ea37b2dfff177283abd099f01f18a21"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/excitation_conditions.py",
+      "bytes": 919,
+      "sha256": "3ac6ab73ece836fada9b0eb419caf64d21e377cda52ede3c6ee5d1c52d1f6652"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/generate_stage8_panel.py",
+      "bytes": 26685,
+      "sha256": "80cfd397d3258a61e88180fb5d95e5ee5164bcda186f897fa1967554129b0706"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/run_stage8_generation_xtb.py",
+      "bytes": 21724,
+      "sha256": "c6b54ceaf8f411779a8999a5cc61de01e8caf237d32315d71be1d802720d9c8e"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/run_stage8_xtb_stda.py",
+      "bytes": 27337,
+      "sha256": "6963c7b900411368705a456a53298362a7f021efc8564a2e614531bdb66a302d"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/stage7_comparison.py",
+      "bytes": 32091,
+      "sha256": "f15d0c127e7a5b555775545bd145760891072df04f4de251ac7a5ac9ee530c2d"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/train_hp1kg_linear_condition.py",
+      "bytes": 15336,
+      "sha256": "2d703be68a342076c7dd1afd67ab298fd7fbaa645a7d7d24a4d302b1ccf3f748"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/train_stage8.py",
+      "bytes": 17907,
+      "sha256": "b07d6bd2b0341e18862dd6a6266fddedd0c5ab8761e2f81b5171f1396922d329"
+    },
+    {
+      "path": "MolGuidance_guidance_selector_e987/tools/verify_stage8.py",
+      "bytes": 14145,
+      "sha256": "36611338721fbf57ef2dd8fb73db8a4e4e3668a0a1b52d52f12cb00652c656b9"
+    },
+    {
+      "path": "molguidance_hp1kg_baseline/convert_hp1kg_joint_kekule.py",
+      "bytes": 20292,
+      "sha256": "5703d9bb0e08637b3f1243f85a475413a88e5500e13bdd3d0015375737f27621"
+    },
+    {
+      "path": "stgg_s1_stage8/EXPERIMENT.txt",
+      "bytes": 3554,
+      "sha256": "6a4d1d09157c09e8aebebabc6b803507d3189ff317cfe814d0ce0e4123f3a1f9"
+    },
+    {
+      "path": "stgg_s1_stage8/prepare.py",
+      "bytes": 15838,
+      "sha256": "5e70eba51a8e0719a182edc260502c57044f36ecd01970bf03c3c079bf7b5a32"
+    },
+    {
+      "path": "stgg_s1_stage8/sample.py",
+      "bytes": 9849,
+      "sha256": "47db91812d87d3c3f3f2d81f19b2cb71d9575c40c829b9e0b6e6ec135d7e8863"
+    },
+    {
+      "path": "stgg_s1_stage8/workflow.py",
+      "bytes": 14599,
+      "sha256": "485f80496db3758d2ee584cee3aa9e57a69db226e24a7862af2acd33723443a0"
+    }
+  ],
+  "python_syntax_checked": [
+    "MolGuidance_guidance_selector_e987/molguidance/analysis/generation_callback.py",
+    "MolGuidance_guidance_selector_e987/molguidance/analysis/joint_decode.py",
+    "MolGuidance_guidance_selector_e987/molguidance/data_processing/data_module.py",
+    "MolGuidance_guidance_selector_e987/molguidance/data_processing/dataset.py",
+    "MolGuidance_guidance_selector_e987/molguidance/data_processing/edge_budget.py",
+    "MolGuidance_guidance_selector_e987/molguidance/data_processing/kekule_augmentation.py",
+    "MolGuidance_guidance_selector_e987/molguidance/model_utils/load.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/chemistry_auxiliary.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/classifier_free_guidance.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/correction.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/flowmol.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/mask_ctmc.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/mg_targets.py",
+    "MolGuidance_guidance_selector_e987/molguidance/models/model_guidance_scale.py",
+    "MolGuidance_guidance_selector_e987/tests/test_ema_edge_offset.py",
+    "MolGuidance_guidance_selector_e987/tests/test_joint_chemistry_auxiliary.py",
+    "MolGuidance_guidance_selector_e987/tests/test_linear_energy_condition.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_budget.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_generation_xtb.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_joint_decode.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_kernels.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_mg.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_resume_safety.py",
+    "MolGuidance_guidance_selector_e987/tests/test_stage8_xtb_targets.py",
+    "MolGuidance_guidance_selector_e987/tools/audit_stage8_panel.py",
+    "MolGuidance_guidance_selector_e987/tools/calibrate_generation_geometry.py",
+    "MolGuidance_guidance_selector_e987/tools/diagnose_stage8_joint_failures.py",
+    "MolGuidance_guidance_selector_e987/tools/excitation_conditions.py",
+    "MolGuidance_guidance_selector_e987/tools/generate_stage8_panel.py",
+    "MolGuidance_guidance_selector_e987/tools/run_stage8_generation_xtb.py",
+    "MolGuidance_guidance_selector_e987/tools/run_stage8_xtb_stda.py",
+    "MolGuidance_guidance_selector_e987/tools/stage7_comparison.py",
+    "MolGuidance_guidance_selector_e987/tools/train_hp1kg_linear_condition.py",
+    "MolGuidance_guidance_selector_e987/tools/train_stage8.py",
+    "MolGuidance_guidance_selector_e987/tools/verify_stage8.py",
+    "molguidance_hp1kg_baseline/convert_hp1kg_joint_kekule.py",
+    "stgg_s1_stage8/prepare.py",
+    "stgg_s1_stage8/sample.py",
+    "stgg_s1_stage8/workflow.py"
+  ],
+  "scope": "Current Stage8 runtime, training/generation/XTB tools, configs, tests, and STGG-S1 companion workflow; no raw DB, checkpoint, bundle, or backup files."
+}

@@ -1,0 +1,6 @@
+{
+  "kernel_ring_5_6_fraction": 0.9682735864182055,
+  "kernel_ring_5_6_hetero_fraction": 0.25909475443470104,
+  "kernel_small_ring_molecule_rate": 0.0764034230961405,
+  "kernel_seven_plus_ring_molecule_rate": 3.2483314241563144e-09
+}

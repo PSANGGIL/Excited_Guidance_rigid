@@ -1,0 +1,31 @@
+{
+  "created_utc": "2026-10-27T05:21:13.514849+00:00",
+  "source_sha256": {
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/summary.json": "23d2e48384105b7bf1123430d827595f8a32b823604b7fe8758cbd72cb14c547",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/all_1000_structure_energy.csv": "f1f226301dcad08e0dde05f9fc65ad6b923662005918855acc7a119c02a3eaf2",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/target_hits.csv": "815201a517864413d061f4cee83437801662a433ce480358ade49f2635849e23",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/target_hits_aromatic_only56_uncharged_wbo_clear.csv": "10c23148508b2156a924817a7fe55534687e20d193548fd576694d195d5b2bb0",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/present_hp1kg_e4690_s1_minus_2t1_20261027.py": "1f126e8de5086b7208a7ab90022b7a6626caf3680a75c744d6a97b2498371f5c"
+  },
+  "report_txt": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/analysis_report_ko.txt",
+  "report_html": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/analysis_report_ko.html",
+  "figures": [
+    [
+      "analysis_overview.png",
+      "\uc131\uacf5\ub960\u00b7\uc5d0\ub108\uc9c0\u00b7\uace0\ub9ac \uad6c\uc131\u00b7\ucd5c\uc801\ud654 \uacbd\uace0"
+    ],
+    [
+      "energy_histograms.png",
+      "S1, T1, S1\u22122T1 \uac1c\ubcc4 \ud788\uc2a4\ud1a0\uadf8\ub7a8"
+    ],
+    [
+      "database_comparison.png",
+      "DB \ubc0f \ubd84\uc790 \ud06c\uae30 \uc7ac\uac00\uc911 \ube44\uad50"
+    ],
+    [
+      "target_hits_aromatic_only56_uncharged_wbo_clear_00.png",
+      "\uc120\ubcc4 \ud6c4\ubcf4 10\uac1c \u2014 \uc6d0\ubcf8 \uc0dd\uc131 \uadf8\ub798\ud504"
+    ]
+  ],
+  "verified_candidates": 10
+}

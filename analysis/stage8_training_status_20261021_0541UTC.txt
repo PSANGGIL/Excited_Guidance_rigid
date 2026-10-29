@@ -1,0 +1,48 @@
+Stage8 두 학습 진행 상황
+=======================
+
+조회 기준: 2026-10-21 05:41 UTC
+내용: 직전 대화에서 보고한 학습 상황을 내보낸 기록입니다.
+주의: 아래 수치는 해당 조회 시점의 기록이며 실시간 상태가 아닙니다.
+
+두 학습 모두 정상 실행 중입니다.
+
+항목                     HP1KG · EST                  STGG · S1
+-----------------------  ---------------------------  --------------------------
+진행                     epoch 1348 완료, 1349 진행   첫 epoch 31.5%
+Optimizer step           약 58,050                    4,020
+최근 완료 validation loss 0.32142                     첫 validation 전
+Best checkpoint          e1321 / 0.30841              아직 없음
+최대 epoch               10,000                       10,000
+
+HP1KG:
+- 집계한 최근 30 epoch의 평균 validation loss가 0.34487 → 0.33589로
+  약 2.60% 감소했습니다. 완만한 개선이 이어지고 있습니다.
+- 해당 구간: 이전 e1284–1313, 최근 e1314–1343.
+
+STGG:
+- 초기 100 step 평균 train loss 7.796 → 최근 집계 500 step 평균 1.244로
+  감소했습니다. 아직 초기 학습이므로 생성 성능 판단은 이릅니다.
+- 해당 구간: 초기 logged step 0–99, 최근 logged step 3128–3627.
+- S1=4.0 eV, 1,000개 생성은 STGG가 10,000 step 이상 진행하고
+  첫 validation checkpoint가 확보되면 자동 시작하도록 예약돼 있습니다.
+
+실행 상태:
+- 조회한 로그에서 NaN/OOM·예외 종료는 확인되지 않았습니다.
+- 두 프로세스 모두 세션 분리 상태입니다.
+- HP1KG PID: 3582757, PPID: 1, SID: 3582757.
+- STGG PID: 3809652, PPID: 1, SID: 3809652.
+
+해석상 주의:
+같은 모델 구조지만 데이터와 조건이 달라 두 loss의 절댓값을 직접
+성능 비교하면 안 됩니다. train loss 구간 평균은 배치 평균이며,
+validation loss 및 실제 생성 성공률과 구분해야 합니다.
+
+HP1KG 실행 디렉터리:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_cfg_resume_e476_20261021_v3
+
+STGG 실행 디렉터리:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_stgg_s1_4ev_20261021
+
+이 기록을 내보내는 과정에서 모델 코드·설정·학습 프로세스를 변경하지
+않았습니다.

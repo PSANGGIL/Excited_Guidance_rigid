@@ -1,0 +1,13 @@
+{
+  "pid": 1206487,
+  "detached": true,
+  "command": [
+    "/home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python",
+    "-u",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/report_hp1kg_e4690_s1_minus_2t1_20261027.py",
+    "--output",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027",
+    "--worker"
+  ],
+  "started_utc": "2026-10-27T04:36:52.547778+00:00"
+}

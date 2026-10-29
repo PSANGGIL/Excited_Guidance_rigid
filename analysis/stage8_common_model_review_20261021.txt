@@ -1,0 +1,389 @@
+Stage8 공통 모델 구조 리뷰
+=========================
+
+작성일: 2026-10-21 (UTC)
+내용: 직전 대화의 모델 구조 리뷰를 UTF-8 일반 텍스트로 내보낸 문서
+검토 기준: 해당 리뷰 시점의 실행 설정과 소스 코드
+범위: HP1KG EST 실험과 STGG S1 실험에 공통으로 적용되는 Stage8 모델
+
+두 실행에 저장된 models 소스를 대조했고 서로 동일했습니다.
+같은 모델이므로 구조 리뷰를 따로 할 필요는 없습니다. 별개의 아키텍처처럼
+구분한 것은 부정확했습니다.
+
+학습은 서로 다른 데이터·조건으로 독립적인 가중치를 만드는 것이고,
+아래 설명은 두 실험에 공통으로 적용됩니다. 리뷰 및 이 문서 내보내기를
+위해 학습 프로세스를 중단하거나 모델 코드를 변경하지 않았습니다.
+
+
+1. 현재 모델을 정확하게 정의하면
+--------------------------------
+
+Heavy-atom 좌표와 분자 그래프를 함께 생성하는, CFG 조건부
+continuous/discrete flow-matching 모델입니다.
+
+일반적인 Gaussian DDPM처럼 모든 입력에 Gaussian noise를 넣고 ε를
+예측하는 구조는 아닙니다.
+
+- 좌표: 연속적인 interpolation과 좌표 endpoint 예측
+- 원자 상태·결합: MASK 기반 discrete CTMC
+- 조건: 스칼라 하나를 임베딩해 네트워크에 주입
+- 생성: 좌표와 원자 상태·결합을 반복적으로 함께 업데이트
+
+이 계열은 FlowMol-CTMC 연구와 연결됩니다. 현재 코드는 여기에 여러
+보조 학습·피드백 경로를 추가한 형태입니다.
+
+참고 논문:
+Exploring Discrete Flow Matching for 3D De Novo Molecule Generation
+https://arxiv.org/abs/2411.16644
+
+전체 흐름:
+
+분자 그래프 + heavy-atom XYZ + 조건 스칼라
+                  ↓
+        좌표 interpolation / 원자·결합 MASK
+                  ↓
+           조건부 GVP 네트워크
+                  ↓
+       최종 좌표 + 원자 상태 + 결합 예측
+                  ↓
+     반복 생성 → FAKE 제거 → RDKit 구조 구성
+
+
+2. 정확하게 무엇이 입력되는가
+----------------------------
+
+분자 하나에 실제 heavy atom이 N개 있다고 하면 다음 정보를 사용합니다.
+
+입력                  내용
+--------------------  ----------------------------------------------------
+좌표 x                각 heavy atom의 Cartesian 좌표
+원자 상태 s           원소·formal charge·결합된 수소 수의 조합
+결합 e                NONE / SINGLE / DOUBLE / TRIPLE
+조건 c                EST 또는 S1 스칼라 하나
+시간                  좌표 시간 t_x, 그래프 시간 t_g
+선택적 추가 입력      이전 예측의 self-conditioning 정보
+
+2.1. 수소는 제외된 것이 아니라 원자 상태에 포함됩니다
+
+예를 들어 동일한 C라도 수소 수와 전하가 다르면 다른 원자 상태입니다.
+
+다만 다음은 구분해야 합니다.
+
+- 수소 수는 학습합니다.
+- 수소를 별도 노드로 두지는 않습니다.
+- 수소의 3D 좌표는 직접 생성하지 않습니다.
+- radical 수를 직접 출력하는 별도 head도 없습니다.
+
+설정의 use_hydrogen_counts: false는 수소를 무시한다는 뜻이 아니라,
+별도 H-count head 대신 joint atom-state 안에 H를 포함한다는 뜻입니다.
+
+2.2. 실제 결합뿐 아니라 모든 원자쌍을 다룹니다
+
+메시지 전달용 그래프에는 모든 원자쌍이 들어갑니다.
+
+- 무방향 후보쌍: N(N−1)/2
+- 내부 메시지 전달: 양방향으로 저장
+- 실제 결합이 없는 쌍: NONE
+
+따라서 연산량은 대체로 원자 수의 제곱에 따라 증가합니다.
+SMILES 문자열을 직접 신경망에 넣는 방식은 아닙니다.
+
+입력 구성 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/data_processing/dataset.py
+리뷰 시점 기준 줄 번호: 307
+
+2.3. FAKE와 MASK는 서로 다릅니다
+
+- FAKE: 최종적으로 삭제할 수 있는 학습 대상 원자 상태
+- MASK: 생성 과정에서 아직 종류를 모르는 상태
+
+학습에서는 실제 원자 수의 약 30%를 상한으로 FAKE 노드를 추가할 수
+있습니다. 이들은 단순히 무시되는 padding이 아니라 실제 예측 대상입니다.
+
+주 네트워크는 DGL의 가변 크기 그래프 배치를 사용합니다.
+고정 길이 배열을 채우기 위한 padding과는 다릅니다.
+
+
+3. 조건 스칼라는 어떻게 반영되는가
+----------------------------------
+
+현재 설정에서는 조건 RBF expansion이 꺼져 있습니다.
+
+실제 경로는 다음입니다.
+
+조건 스칼라
+→ train 평균·표준편차로 표준화
+→ Linear(1, 256)
+→ SiLU
+→ Linear(256, 256)
+→ LayerNorm
+
+그 임베딩을 분자 내 모든 노드에 전달하고, 초기 node hidden에 다음
+형태로 주입합니다.
+
+    h_i ← h_i + 0.5 × MLP([h_i, Emb(c)])
+
+여기서 0.5는 residual scale이지, 조건 반영률이 50%라는 뜻은 아닙니다.
+
+또한:
+
+- 조건 dropout: 10%
+- GVP hidden/message dropout: 5%
+
+둘 다 적용됩니다. 전체 원자를 5% 삭제하는 방식은 아닙니다.
+
+조건 임베딩 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/flowmol.py
+리뷰 시점 기준 줄 번호: 320
+
+조건 주입 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/ctmc_vector_field.py
+리뷰 시점 기준 줄 번호: 695
+
+
+4. 학습 때 입력을 어떻게 흐트러뜨리는가
+--------------------------------------
+
+현재 코드에서는 시간 0이 noise, 시간 1이 원본 구조입니다.
+
+4.1. 좌표
+
+현재 linear schedule에서는:
+
+    x_(t_x) = (1−t_x) × x_0 + t_x × x_1
+
+- x_0: 중심을 맞춘 Gaussian 좌표
+- x_1: DB 좌표
+- 모델 출력: Gaussian noise ε가 아니라 원본 좌표의 예측값 x̂_1
+
+학습용 noise에는 원본과의 위치 대응·정렬도 적용합니다.
+이는 noise를 재배치하는 것이며 원본 분자의 원자·결합 인덱스를
+따로 뒤섞는 것은 아닙니다.
+
+4.2. 원자 상태와 결합
+
+각 항목을:
+
+- 확률 t_g로 원래 상태 유지
+- 확률 1−t_g로 MASK
+
+처리합니다.
+
+좌표와 그래프 시간은 독립적으로 뽑으며, 50% 확률로 그래프 시간만 1로
+둡니다. 즉, 상당수 학습에서는 “원자 종류와 결합이 알려진 상태에서
+흐트러진 좌표를 복원”하게 됩니다.
+
+이는 그래프와 좌표를 항상 같은 수준으로 손상시키는 방식과 다릅니다.
+
+학습 경로 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/ctmc_vector_field.py
+리뷰 시점 기준 줄 번호: 134
+
+
+5. 네트워크 내부에서는 무엇을 하는가
+-----------------------------------
+
+공통 설정은 다음과 같습니다.
+
+- 노드 scalar hidden: 128차원
+- 노드 vector hidden: 16개의 3D 벡터
+- edge hidden: 64차원
+- 원자 간 거리 RBF: 32차원
+- GVP message-passing/update block: 4개
+
+여기서 32차원 RBF는 조건값이 아니라 원자 간 거리에 적용합니다.
+
+GVP는 원자 간 상대 위치, 거리, 원자 상태와 결합 상태를 사용해
+scalar/vector 정보를 교환합니다. 각 block의 순서는:
+
+1) 노드 scalar/vector hidden 업데이트
+2) edge hidden 업데이트
+3) 갱신된 edge 정보를 이용해 좌표 이동
+4) GVP 좌표 residual 추가
+5) 변경된 좌표에서 거리 재계산
+
+입니다.
+
+따라서 결합과 좌표가 완전히 따로 생성되는 모델은 아닙니다.
+결합 hidden이 좌표 업데이트에 영향을 주고, 변경된 거리가 다음
+결합 업데이트에 다시 들어갑니다.
+
+다만 bond-first는 “유효한 분자 그래프를 먼저 완성한다”는 뜻이 아닙니다.
+중간 edge hidden을 먼저 갱신한다는 의미입니다.
+
+업데이트 구현:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/vector_field.py
+리뷰 시점 기준 줄 번호: 279
+
+5.1. Self-conditioning과 chemistry feedback
+
+학습 호출의 50%에서는 먼저 gradient 없이 endpoint를 예측하고,
+그 결과를 다시 입력해 두 번째 예측을 학습합니다.
+
+이때 이전 예측의:
+
+- 원자 상태 확률
+- 결합 확률
+- 예상 결합 차수 합
+- 수소·전하·FAKE 상태
+- 원자 상태와 결합 차수의 불일치 정보
+
+등을 hidden에 전달합니다.
+
+원본 정답을 생성 과정에 넣는 것이 아니라 모델 자신의 이전 예측을
+다시 참고하는 경로입니다.
+
+Self-conditioning·FAKE·좌표 교란은 FlowMol3에서 제시한 개선 방향과
+관련되지만, 현재 구현·데이터가 그 논문과 동일한 것은 아닙니다.
+
+참고 논문:
+FlowMol3: Flow Matching for 3D De Novo Small-Molecule Generation
+https://arxiv.org/abs/2508.12629
+
+
+6. 실제 loss는 무엇인가
+----------------------
+
+현재 총 loss의 주요 구성은 다음과 같습니다.
+
+    L = 3 L_x + L_s + 2 L_e
+        + 0.5 L_edge_existence
+        + 0.25 L_connectivity
+        + 0.2 L_aromatic
+        + 0.02 L_valence_distribution
+        + 0.01 L_charge_distribution
+        + L_correction
+
+- L_x: 좌표 endpoint MSE
+- L_s: joint atom-state cross entropy
+- L_e: 결합 상태 cross entropy
+
+categorical CE는 MASK 상태인 유효 항목에만 적용합니다.
+
+현재 reduction은 예전 broadcasting 방식이 아니라:
+
+    L_cat = Σ(i∈M)[w_i × CE_i] / |M|
+
+입니다. 현재 시간 가중치는:
+
+    w(t) = clip(t / (1−t), 0.05, 1.5)
+
+입니다.
+
+이는 시간 가중 denoising loss와 화학 보조항을 결합한 목적함수입니다.
+전체를 엄밀한 likelihood나 ELBO와 동일하다고 해석하면 안 됩니다.
+
+loss 구현:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/loss_utils.py
+리뷰 시점 기준 줄 번호: 13
+
+6.1. 특히 방향족 loss의 의미
+
+현재 방향족 항은:
+
+- 원본 방향족 edge에 단일/이중결합 확률을 부여
+- 각 방향족 원자의 예상 이중결합 수를 맞춤
+
+하는 방식입니다.
+
+고리 전체의 유효한 Kekulé 배치를 공동으로 강제하는 loss는 아닙니다.
+
+예를 들어 벤젠의 모든 edge가 단일 0.5·이중 0.5라면 원자별 예상
+이중결합 수는 1입니다. 하지만 실제 결합을 샘플링했을 때 반드시
+올바른 교대 배치가 나오는 것은 아닙니다. 다른 loss가 이 모호성을
+일부 억제하더라도, 방향족 보조항 자체는 이를 보장하지 않습니다.
+
+연결성 항도 정답 연결 edge의 유지 확률을 높이는 보조항이지,
+생성 그래프 전체의 연결성을 강제로 만족시키는 solver는 아닙니다.
+
+화학 보조항 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/models/chemistry_auxiliary.py
+리뷰 시점 기준 줄 번호: 154
+
+
+7. 생성은 어떻게 진행되는가
+--------------------------
+
+1) 조건 주변의 train 데이터 분포에서 heavy-atom 수를 샘플링합니다.
+2) FAKE를 위한 추가 용량을 둡니다.
+3) Gaussian 좌표와 MASK 원자·결합에서 시작합니다.
+4) 조건부·무조건부 endpoint를 예측해 CFG로 결합합니다.
+5) 좌표와 categorical 상태를 반복 업데이트합니다.
+6) FAKE를 제거하고 예측한 원자·전하·H 수·결합으로 RDKit 분자를 구성합니다.
+
+좌표 업데이트에 쓰는 vector field는 현재 linear schedule에서:
+
+    v_θ(x_t, t, c) = (x̂_1 − x_t) / (1−t)
+
+형태입니다.
+
+CFG의 좌표 결합은:
+
+    v_guided = (1−w) × v_uncond + w × v_cond
+
+이므로 w=0은 무조건부, w=1은 조건부 예측 그대로입니다.
+categorical 부분은 확률 또는 전이율 공간에서 별도로 처리합니다.
+
+RDKit 디코더는 예측 H 수를 명시하고 implicit-H 자동 보충을 끕니다.
+Heavy-atom 좌표도 예측값을 그대로 저장합니다.
+이 단계 자체에서 ETKDG로 좌표를 다시 만들지는 않습니다.
+
+디코더 코드:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/molguidance/analysis/molecule_builder.py
+리뷰 시점 기준 줄 번호: 355
+
+
+8. 두 실험에서 실제로 다른 부분과 리뷰 결론
+-----------------------------------------
+
+구조는 같지만 데이터에 따라 다음은 다릅니다.
+
+항목                         HP1KG 실험             STGG 데이터 실험
+---------------------------  ---------------------  ----------------------
+조건 스칼라                  EST = S1−T1            S1
+원소 종류                    12종                   8종
+원자 상태 출력 수, FAKE 포함  38                     19
+학습 좌표                    공식 최적화 XYZ        기존 전처리 conformer
+학습 가중치                  기존 학습 재개         독립 학습
+
+STGG-AL의 별도 생성 모델을 돌리는 것이 아니라, 같은 Stage8 모델에
+STGG 데이터를 넣은 실험입니다.
+
+현재 구조에 대한 핵심 판단은 다음입니다.
+
+- 좌표·원자 상태·결합을 서로 연결해 학습하는 경로는 있습니다.
+- 수소는 원자 상태에 포함되어 있습니다.
+- 조건 dropout과 일반 hidden dropout 모두 있습니다.
+- 하지만 원자 상태의 joint 예측과 분자 전체의 화학적 joint consistency는
+  다른 문제입니다.
+- 방향족·연결성 보조 loss가 낮아도 최종 분자의 유효성을 보장하지 않습니다.
+- condition-shuffle loss 차이는 조건 사용 여부의 진단이지,
+  생성 분자의 실제 에너지 오차가 아닙니다.
+
+따라서 공통 모델의 남은 핵심 위험은 “입력이 서로 단절되어 있다”보다는
+“서로 연결된 확률 예측이 최종적으로 하나의 유효한 분자로 동시에
+성립하느냐”에 있습니다.
+
+두 데이터 실험은 이 공통 모델의 성능을 비교하는 것이며,
+아키텍처를 따로 검토할 대상은 아닙니다.
+
+
+검토 대상 실행본
+---------------
+
+HP1KG EST 실행 디렉터리:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_cfg_resume_e476_20261021_v3
+
+HP1KG 소스 스냅샷:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_cfg_resume_e476_20261021_v3/source_snapshot
+
+STGG S1 실행 디렉터리:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_stgg_s1_4ev_20261021
+
+STGG 소스 스냅샷:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_stgg_s1_4ev_20261021/model_source_snapshot
+
+주의: 코드 줄 번호와 “현재 설정”이라는 표현은 2026-10-21 리뷰 시점
+기준입니다. 이후 코드·설정이 변경되면 해당 실행본의 스냅샷을 기준으로
+대조해야 합니다. 이 문서는 구조 리뷰의 내보내기이며, 모든 가능한
+입력·생성 경로에 대한 완전한 정합성 증명이나 새 성능 실험 결과는 아닙니다.

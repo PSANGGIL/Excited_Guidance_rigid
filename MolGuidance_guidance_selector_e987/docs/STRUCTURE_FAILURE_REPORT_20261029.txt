@@ -1,0 +1,313 @@
+Stage8 분자 생성: 구조 실패, 다양성, 평가 한계 보고서
+작성일: 2026-10-29 UTC
+코드 스냅샷: c8af84d
+브랜치: feature/molguidance-stage8-joint-decoding-mg-budget
+
+이 문서의 목적은 구조가 성립하지 않는 경우와 구조 분포가 치우치는 경우를
+분리하고, 확인된 원인·가설·미해결 항목을 기록하는 것이다.
+평가의 우선 목표는 화학적으로 합리적인 다양한 구조를 생성하는 능력이다.
+XTB/sTDA는 조건에 따른 물성 이동을 보는 보조 평가이며, 해당 계산의 목표
+오차만으로 모델 전체 성능이나 후보의 합성 가능성을 판정하지 않는다.
+
+1. 분석 대상과 재현 범위
+
+- HP1KG 공식 XYZ 1,581개: train 1,264 / validation 158 / test 159.
+- heavy atom 좌표, 원소·H 수·formal charge의 joint state,
+  Kekulé NONE/SINGLE/DOUBLE/TRIPLE 결합을 사용한다.
+- 수소는 독립 좌표 node가 아니라 heavy atom에 붙은 정수 H count이다.
+- 모델은 좌표 endpoint flow와 categorical masked CTMC를 결합한다.
+  이 버전을 Gaussian-noise DDPM으로 새로 바꿨다고 해석하지 않는다.
+- 현재 실험 조건 Q=S1−2*T1, 단위 eV. EST=S1−T1과 구분한다.
+  학습 라벨은 각 분자의 실제 Q이고, 생성 시 목표 0을 입력한다.
+- 새 초기화 학습은 10,000 epoch / 430,000 optimizer step을 완료했다.
+  분석 checkpoint는 validation loss 기준 best e4690, step 201,713이다.
+  생성 품질을 비교하여 선택한 best checkpoint라는 의미는 아니다.
+- 생성 1,000개: seed 20261027, CFG 1, 100 timepoints, batch 16.
+- 원자 수는 train의 목표 주변 kernel 분포에서 샘플링했다.
+  bandwidth 0.15 eV, nearest_k 128, effective sample size 17.04.
+- XTB 입력 전 diffusion heavy XYZ를 그대로 보존했다. RDKit으로 H 좌표만
+  추가했으며 ETKDG/MMFF/UFF로 heavy 좌표를 다시 생성하지 않았다.
+- 24개 병렬 계산, 각 1 CPU thread. XTB --opt loose --cycles 500,
+  net charge 0 / uhf 0, 이후 별도 singlet/triplet sTDA 계산.
+- XTB 최적화 과정에서는 원자 좌표가 이동한다. 초기 좌표 보존과 최적화
+  전후 동일 좌표를 혼동하지 않는다.
+- 이번 성능 통계는 raw 생성 그래프이다. 최종 joint/MAP projection은
+  별도 경로이며, projection 결과로 XTB 성공분을 대체하지 않았다.
+
+체크포인트 SHA256:
+8ae8da1e31ed2389b4c4a9336c8a1dd4c252d07c95730817af81fa65300aabdd
+
+2026-10-29 검증:
+- 현재 코드와 생성 manifest의 model/source 파일 64/64개 해시 일치.
+- 기존 분석의 원자료 및 스크립트 83개 해시 재검증, 불일치 0건.
+- 452개 좌표·WBO 재대조 및 904개 singlet/triplet 로그 에너지 확인.
+- 전체 CPU unit/regression tests 130개 통과. 코드 커밋 대상 Python
+  39개 구문 검사 및 git diff --cached --check 통과.
+이는 알려진 계약의 테스트 통과이며, 생성 품질이나 전체 입력 공간에 대한
+논리·수학적 무결성 증명은 아니다. 아래 실패가 실제로 남아 있다.
+
+2. 계산 전 구조 실패와 계산 실패의 구분
+
+전체 시도                         1,000
+RDKit 유효                         574  (57.4%)
+연결된 RDKit 유효                   565  (56.5%)
+연결된 중성·폐각, XTB/sTDA 완료      452  (45.2%)
+
+계산 전 제외 548개를 파이프라인 판정 순서에 따라 중복 없이 분해:
+- 원자가 예외를 포함한 invalid graph: 426
+- open-shell:                         98
+- disconnected:                        9
+- nonzero net charge:                 15
+
+계산에 투입한 452개는 모두 완료됐다. 따라서 XTB 성공률 100%는 이 선별된
+452개 안에서만 성립하며 전체 생성 성공률을 뜻하지 않는다.
+유효 구조의 특성별 집계에서는 radical 102개, net charge 비영 18개 등
+중복이 있으므로 위 상호배타적 제외 숫자와 단순 합산하지 않는다.
+
+3. 구조 파손 A: heavy bond order와 H 상태의 충돌
+
+전체 1,000개 endpoint의 36,413개 실제 heavy atom을 검사했다.
+각 원자에서 B_i = sum_j bond_order(i,j), H_i = 예측 H count로 정의하고,
+원래 상태와 H_i=0인 상태를 RDKit 원자가 검사에 각각 넣었다.
+
+- 무효 426개 중 312개(73.24%)는 수소를 제거해도 heavy bond-order 합이
+  허용 원자가를 넘는다. 이 경우 수소 후처리만으로 해결할 수 없다.
+- 나머지 114개는 H를 줄이면 모든 국소 overflow를 제거할 수 있다.
+- 원자가 초과 원자 933개, 그중 H=0에서도 초과하는 원자 500개.
+- 주요 패턴: C(charge 0, H 0, B 5) 450개;
+  C(charge 0, H 1, B 4) 423개. 이는 분자 수가 아닌 원자 수다.
+- heavy-only overflow 중성 C 464개 중 463개는 heavy 이웃이 4개 이하다.
+  따라서 연결 이웃 수를 4로 제한하는 규칙만으로 문제를 막을 수 없다.
+
+실제 사례(모든 index는 0-based):
+- 생성 #000006: 요청 40 / 실제 41 heavy atoms.
+  atom index 38, original slot 40은 C, H=0, heavy degree=4,
+  heavy bond order=5이다. 수소가 추가되기 전부터 과원자가다.
+- 생성 #000007: 요청 40 / 실제 42 heavy atoms.
+  atom index 14, original slot 15는 C, H=1, heavy degree=3,
+  heavy bond order=4이다. H 상태와 결합차수 합이 충돌한다.
+  여기서는 H를 하나 줄이는 진단용 변경으로 연결된 중성·폐각이 된다.
+  이것만으로 H가 원래 틀렸는지, bond order가 틀렸는지는 확정하지 못한다.
+
+고정 heavy graph/원소/전하에서 train-supported H만 재할당한 반사실 진단:
+- 무효 426개 중 H assignment 존재 및 RDKit valid 111개.
+- 그중 연결된 중성·폐각 106개.
+- 원래 유효하지만 radical이 있던 102개 중 90개도 같은 진단에서
+  연결된 중성·폐각이 되었다.
+원본을 바꾸거나 새 XTB를 수행한 결과가 아니다. 이 숫자를 실제 생성
+성공률에 더하지 않는다. 올바른 구조가 복원됐다는 증명도 아니다.
+
+판정: H count를 모델에 넣은 것만으로 H/bond 공동 일관성이 보장되지 않는다.
+평균적인 auxiliary loss 감소와 개별 sampled endpoint의 유효성은 구분해야 한다.
+
+4. 구조 파손 B: 최종 projection의 feasible 선택지 소실
+
+저장된 optional joint/MAP 결과: optimal 93, infeasible 907.
+raw 무효에서 11개를 복구했지만 raw 유효 492개도 projection에서 실패했다.
+원본과 동일한 그래프는 53개이다. raw 결과는 별도로 보존돼 있다.
+
+확인한 필요조건 위반:
+- 양의 확률 support에서 가능한 real atom count 범위에 요청 count가
+  없는 경우 679개.
+- 원자별 가능한 bond-order/valence 범위가 충돌하는 경우 179개.
+- 두 조건의 합집합 730개: infeasible 907개의 80.49%를 설명한다.
+  나머지 실패의 원인은 모두 분리해 규명한 상태가 아니다.
+
+예: #000003은 요청 count 32지만 support 내 real atom 수가 29로 고정된다.
+#000005는 요청 32지만 가능한 count가 40이다. 시간제한 연장만으로 이러한
+논리적 불가능 조건을 해결할 수 없다.
+
+실제 categorical temperature는 T=0.05이다. CFG=1의 corrected probability
+경로는 허용 class에 대해 q_k ∝ max(p_k, 1e−9)^(1/T), 즉 지수 20을 적용한다.
+p=[0.999,0.001]의 작은 후보는 float64에서 약 1.02e−60이지만 float32
+계산에서는 0으로 내려간다. 의도적인 unsupported class mask와 이 수치적 0을
+같은 것으로 취급하면 안 된다.
+
+저장된 실제 heavy-heavy 결합 42,688개 중 41,059개(96.18%)는 양의 확률을
+가진 bond class가 하나뿐이다. NONE pair가 많아서 생긴 집계 효과를 줄이기
+위해 실제 결합만 따로 계산한 수치다.
+실제 atom 36,413개 중 85.26%도 양의 확률 state가 하나뿐이다.
+solver는 p>0인 선택지만 변수로 만들므로 underflow가 feasible set을 바꾼다.
+모든 0이 underflow라는 주장이나 raw 실패 전체가 temperature 때문이라는
+인과 주장은 하지 않는다. temperature 적용 전 logits가 없어 저장된 0에서
+원래 작은 확률을 역으로 복원할 수도 없다.
+
+현재 코드 위치:
+- molguidance/models/ctmc_vector_field.py:36  기본 temperature
+- molguidance/models/classifier_free_guidance.py:76  guided probability
+- molguidance/models/classifier_free_guidance.py:596  required count 전달
+- molguidance/models/classifier_free_guidance.py:985  endpoint 확률 저장
+- molguidance/analysis/joint_decode.py:152  p>0 support 선택
+
+위 경로는 이 스냅샷에 그대로 남아 있다. 이번 커밋은 기록이며 수정을
+완료했다는 선언이 아니다.
+
+5. 구조 분포 문제: 고리 중심 편향과 줄어든 조성 다양성
+
+항목                                  train 1,264       계산 완료 452
+방향족 포함                              85.92%              96.02%
+3·4원 고리 포함                           2.37%              16.81%
+7원 이상 고리 포함                        5.22%              51.33%
+9원 이상 고리 포함                        2.61%              10.84%
+고리가 모두 5·6원                        88.37%              43.14%
+평균 고리 수                              3.423               5.082
+평균 ring atom fraction                  63.68%              82.98%
+평균 고리 밖 heavy atom 수                 8.847               3.836
+평균 최대 연결 ring-system atom 수         8.974              15.405
+5·6원 고리 중 헤테로 원자 포함률           39.50%              16.58%
+
+고리 크기별 분자 집계는 중복 가능하다. 고리 크기 자체는 불가능 판정이 아니다.
+생성 7원 이상 고리 435개 중 탄소만 포함한 고리가 366개다.
+
+생성 atom count에 맞춰 train을 재가중해도 7원 이상 포함률은 4.86%로 낮다.
+다만 목표 주변 kernel 기준 train의 평균 고리 수는 4.81까지 올라간다.
+따라서 전체 train과의 고리 수 차이만으로 조건 무시를 결론 내리지 않는다.
+조건부 train의 ring atom fraction은 59.39%, 고리 밖 원자는 11.67개,
+5·6원 헤테로 고리 비율은 25.91%이다. 고리 밖 구조와 조성의 차이가 더
+일관되게 남는다. count kernel 가중치는 모델 복사 확률이 아니다.
+
+각 edge를 제거한 최단 경로+1로 가장 짧은 cycle 길이도 확인했다.
+7원 이상이 필요한 edge가 있는 분자는 생성 232/452, train 66/1264이다.
+이번 큰 고리 과생성은 RDKit cycle-basis 선택만의 착시로 설명되지 않는다.
+
+452개 모두 HP1KG 전체 DB와 canonical non-stereo graph 중복이 없고,
+서로 다른 생성 그래프다. 하지만 이것만으로 유용한 다양성을 입증하지 않는다.
+현재 근거에는 구조 기준을 통과한 집단의 scaffold별 빈도, effective scaffold
+count, pairwise similarity, 치환기·헤테로 위치 다양성의 통합 평가가 부족하다.
+서로 다른 부적절한 그래프가 많이 나와도 uniqueness는 높아질 수 있다.
+
+6. 좌표 평가와 재분석에서 정정한 항목
+
+XTB 최적화 전후 heavy-atom aligned RMSD 평균 0.745 Å, 중앙값 0.617 Å.
+1 Å를 넘는 분자는 126/452개다. 이는 좌표 변화량이며 strain energy 자체가 아니다.
+기존 heavy bond WBO<0.3 경고 1개, 새 heavy contact WBO>0.5 경고 18개,
+H transfer 경고 0개. 합집합 WBO 경고는 18개다.
+WBO 경고는 결합 재편성 검토 신호이며 완전한 molecular identity 판정이 아니다.
+
+기존 strict_generation.py:50 및 초기 분석 helper는 ring의 원자가 모두
+aromatic이면 평면성 검사에 포함했다. 그러면 비방향족 연결 결합을 가진
+cycle도 포함될 수 있다. 2026-10-29 재분석에서는 고리 전체 결합이 aromatic인
+경우로 정의를 좁혔다. 이 역시 RDKit에 기반한 운영상 지표다.
+
+- 최적화 후 plane RMS>0.15 Å: 기존 102개 → 새 기준 89개.
+- 계산 완료분의 입력 geometry 통과: 기존 364개 → 새 기준 373개.
+- 이는 평가 정의 변경이며 모델 개선이나 새 생성 성공이 아니다.
+- production strict_generation.py의 기존 평면성 로직은 아직 수정하지 않았다.
+  현재 callback의 geometry 수치와 재분석 수치를 같은 정의로 합치지 않는다.
+
+구조별 오기 정정:
+- #830에 O−O 결합이 있다는 이전 설명은 오류다. 원본 SDF에서 O는 C와
+  결합하고 O−O edge는 없다. C47H30O3이며 작은 oscillator strength와 큰
+  좌표 변화량은 별도 관찰이지 O−O 반응성의 근거가 아니다.
+- #189의 [N+](=O)[O−]는 nitro 표기이다. net charge 0, radical 0이다.
+  형식전하 원자가 있다는 이유만으로 비정상 또는 zwitterion으로 단정하지 않는다.
+- 목표 근접 34개 중 5·6원만 가진 후보는 12개이며 모두 이번 입력 geometry,
+  결합 기준 post-opt 평면성, WBO 경고 없음 조건을 통과한다.
+  12개에서 방향족 포함을 요구하면 11개(#638 제외), 모든 원자의 formal
+  charge 0까지 요구하면 10개(#189 제외)다. 10개는 화학적으로 가능한
+  분자의 총수가 아니라 추가 선호 조건을 적용한 선별 수치였다.
+
+7. 분자 크기에 따른 생존 편향
+
+요청 heavy atom 구간    시도     RDKit valid    XTB 완료    |Q|≤0.1
+16–25                   326          303          264          17
+26–35                   130           87           68           5
+36–45                   365          139           97           9
+46–100                  179           45           23           3
+
+큰 분자에서는 많은 후보가 계산 전에 탈락한다. 살아남은 일부의 물성 오차가
+작다는 사실로 그 크기 구간의 생성 능력이 우수하다고 결론 내릴 수 없다.
+요청 원자 수 평균 34.224, 실제 endpoint 36.413, 정확히 일치 119/1000이다.
+현재 count 입력은 생성 endpoint의 real atom 수를 보장하지 않는다.
+
+8. XTB/sTDA를 보조 지표로 해석하는 기준
+
+계산 완료 452개의 Q 평균 −1.081 ± 0.880 eV, 목표 MAE 1.124 eV.
+|Q|≤0.1인 후보 34개는 전체 생성의 3.4%, 계산 완료분의 7.52%다.
+근접 후보 중 S1<1 eV가 17개다. Q 하나의 조건은 S1/T1 개별 절대값이나
+oscillator strength를 고정하지 않는다.
+
+학습 label은 NEVPT2, 후처리는 XTB/sTDA이다. 과거 DB 기준 Q≈0인 11개는
+XTB에서 평균 −0.531 eV였으며 1개만 같은 ±0.1 eV 구간에 남았다.
+과거 DB 계산과 현재 생성 계산은 초기 geometry protocol도 다르다.
+전체 평균 offset을 빼서 생성물의 정답 Q를 추정하지 않았다.
+
+이번 단일 조건·seed 표본에는 matched CFG=0/다른 조건 대조가 없다.
+원자 수 sampler, 구조 생존 편향, 계산 수준 차이가 섞여 있으므로 물성 이동을
+가이던스만의 인과효과로 해석하지 않는다. 고수준 전자구조·Hessian·합성
+가능성 검증도 시행한 상태가 아니다.
+
+9. 다음 수정 및 평가의 우선순위 — 아직 적용하지 않은 제안
+
+A. 평가 계약을 먼저 분리한다.
+   raw graph validity, connected/closed-shell, 좌표 진단, 구조 다양성,
+   XTB 완료, condition fidelity를 별도 분모로 기록한다.
+   3·4원 또는 7원 이상이라는 이유만으로 모든 후보를 강제 제외하지 않는다.
+   production/reanalysis의 aromatic-plane 정의와 정정 사항을 일치시킨다.
+
+B. 기존 checkpoint에서 final decoder의 수치 support/count 문제를 대조한다.
+   temperature 적용 전 log-probability 또는 logits와 의도적 class mask를
+   별도 저장하고 log-domain 비용을 사용한다. exp 후 p==0을 금지 조건으로
+   쓰지 않는다. 의도적으로 금지한 class를 epsilon으로 되살리지 않는다.
+   stochastic fake/real count와 strict requested count의 의미를 통일하거나,
+   actual count 유지와 requested count 강제를 서로 다른 실험으로 기록한다.
+   동일 checkpoint/count/noise로 raw와 projected 성능·수정량·다양성을 비교한다.
+
+C. H/atom-state와 bond-order 공동 일관성을 개선한다.
+   degree cap과 H-only 후처리의 한계를 반영해 원자별 valence 분포와 실제
+   sampled endpoint의 충돌을 직접 측정한다. 전역 Kekulé assignment 및
+   connectivity와의 상호작용을 검증한다. loss 항 추가만으로 해결을 선언하지 않는다.
+
+D. 구조 기준을 통과한 집단에서 다양성을 평가한다.
+   scaffold와 ring-system별 빈도/집중도, pairwise fingerprint 분포,
+   치환기 수·위치, hetero atom 위치·조성, non-ring atom 비율을 기록한다.
+   원자 수·조건 구간별 비교를 유지하고 novel graph 수만으로 순위를 정하지 않는다.
+   DB 지원이 낮은 구조는 novelty와 불합리성을 구분해 개별 검토한다.
+
+E. 위 결과가 확인된 뒤 학습 objective 변경 여부를 결정한다.
+   원자 수·temperature·projection의 평가 정의가 다른 실험을 학습 효과로
+   섞지 않는다. XTB 목표 오차를 낮추는 것만으로 새로운 모델을 선택하지 않는다.
+   aromatic loss weight 증가, 모든 큰 고리 금지, 장기학습 연장만으로
+   문제가 해결된다는 근거는 현재 없다.
+
+10. 파일과 검증 기록
+
+아래 경로는 repository root 기준이다.
+
+현재 코드·설정·학습/생성 도구:
+  MolGuidance_guidance_selector_e987/
+  molguidance_hp1kg_baseline/convert_hp1kg_joint_kekule.py
+  stgg_s1_stage8/  (동일 모델의 별도 S1 데이터 workflow; 본 성능 분모와 구분)
+
+테스트와 커밋 범위:
+  analysis/stage8_commit_validation_20261029/verification.json
+  analysis/stage8_commit_validation_20261029/unittest.log
+  analysis/stage8_commit_validation_20261029/code_scope.json
+
+최신 정정 보고서·452개 재검사·34개 목표 근접·12개 RDKit 2D:
+  analysis/hp1kg_e4690_result_reanalysis_20261029/
+
+원자별 원자가·확률 support·조건부 DB·solver 진단:
+  analysis/hp1kg_e4690_deep_diagnostics_20261028_verified/
+
+1,000개 결과 원장·기존 DB 재계산 비교:
+  analysis/hp1kg_e4690_s1_minus_2t1_n1000_report_20261027/
+
+이전 두 보고서는 당시 이력으로 보존하며, 각 폴더의 ERRATA_20261029.txt와
+본 문서의 정정 내용을 우선한다. 데이터/체크포인트/원본 결과를 삭제하지 않았다.
+
+Git에는 관련 코드·설정·테스트·분석 스크립트·보고서·검증 근거를 보존한다.
+대용량 DB/ckpt/raw endpoint/quantum work directory는 로컬 보존 대상이며
+이번 Git 푸시에 포함하지 않는다. 이 파일 없이 원본 quantum 계산 전체를
+재검증할 수 있다는 의미가 아니다. 경로와 provenance hash로 구분한다.
+
+로컬 원본 생성 경로:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage8_hp1kg_best_e4690_s1_minus_2t1_0_n1000_cfg1_20261027
+
+로컬 학습 경로:
+/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_stage8_hp1kg_s1_minus_2t1_cfg_20261024
+
+원본을 보유한 환경에서 재분석:
+  /home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python \
+    analysis/reanalyze_hp1kg_e4690_20261029.py --output /tmp/e4690_recheck_NEW
+새 output 경로를 사용해야 한다. 기존 분석 폴더를 덮어쓰지 않는다.

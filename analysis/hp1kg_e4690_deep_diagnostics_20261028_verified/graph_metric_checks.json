@@ -1,0 +1,44 @@
+[
+  {
+    "smiles": "CCC",
+    "triangles": 0,
+    "four_cycles": 0,
+    "long_cycle_edges": 0,
+    "passed": true
+  },
+  {
+    "smiles": "C1CC1",
+    "triangles": 1,
+    "four_cycles": 0,
+    "long_cycle_edges": 0,
+    "passed": true
+  },
+  {
+    "smiles": "C1CCC1",
+    "triangles": 0,
+    "four_cycles": 1,
+    "long_cycle_edges": 0,
+    "passed": true
+  },
+  {
+    "smiles": "c1ccccc1",
+    "triangles": 0,
+    "four_cycles": 0,
+    "long_cycle_edges": 0,
+    "passed": true
+  },
+  {
+    "smiles": "C1CCCCCC1",
+    "triangles": 0,
+    "four_cycles": 0,
+    "long_cycle_edges": 7,
+    "passed": true
+  },
+  {
+    "smiles": "C12C3C1C23",
+    "triangles": 4,
+    "four_cycles": 3,
+    "long_cycle_edges": 0,
+    "passed": true
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "temperature_default": {
+    "file": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage8_hp1kg_best_e4690_s1_minus_2t1_0_n1000_cfg1_20261027/source_snapshot/molguidance/models/ctmc_vector_field.py",
+    "line": 36,
+    "value": 0.05
+  },
+  "probability_formula": {
+    "file": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage8_hp1kg_best_e4690_s1_minus_2t1_0_n1000_cfg1_20261027/source_snapshot/molguidance/models/classifier_free_guidance.py",
+    "line": 76,
+    "formula": "q_k proportional to class_mask_k * max(p_k,1e-9)^(1/T); CFG=1, T=.05"
+  },
+  "endpoint_storage": {
+    "file": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage8_hp1kg_best_e4690_s1_minus_2t1_0_n1000_cfg1_20261027/source_snapshot/molguidance/models/classifier_free_guidance.py",
+    "line": 985
+  },
+  "decoder_support": {
+    "file": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage8_hp1kg_best_e4690_s1_minus_2t1_0_n1000_cfg1_20261027/source_snapshot/molguidance/analysis/joint_decode.py",
+    "line": 152
+  },
+  "runtime_verification": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_deep_diagnostics_20261028_verified/runtime_temperature_check.json"
+}
