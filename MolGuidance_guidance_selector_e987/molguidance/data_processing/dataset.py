@@ -1,4 +1,5 @@
 import math
+import json
 
 import torch
 from pathlib import Path
@@ -37,6 +38,13 @@ class MoleculeDataset(torch.utils.data.Dataset):
         )
         self.n_atom_states = int(dataset_config.get('n_atom_states', 0))
         self.n_bond_types = int(dataset_config.get('n_bond_types', 5))
+        self.kekule_augmentation_variants = dataset_config.get("kekule_augmentation_variants", 0)
+        if (not isinstance(self.kekule_augmentation_variants, int)
+                or self.kekule_augmentation_variants < 0):
+            raise ValueError("kekule_augmentation_variants must be a nonnegative integer")
+        if self.kekule_augmentation_variants and (
+                not self.use_joint_atom_state or self.n_bond_types != 4):
+            raise ValueError("Kekule augmentation requires joint states and 4 bond classes")
         self.require_chemistry_auxiliary_labels = bool(
             dataset_config.get('require_chemistry_auxiliary_labels', False)
         )
@@ -186,6 +194,22 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.node_idx_array = data_dict['node_idx_array']
         self.edge_idx_array = data_dict['edge_idx_array']
         self.dataset = dataset_config['dataset_name']
+        self.kekule_pools = None
+        self.kekule_augmentation_report = []
+        if self.kekule_augmentation_variants and split in {"train", "train_a", "train_b"}:
+            from .kekule_augmentation import kekule_variants
+            if self.bond_aromatic_flags is None:
+                raise ValueError("Kekule augmentation requires stored aromatic flags")
+            metadata = json.loads((processed_data_dir / "joint_atom_state_metadata.json").read_text())["states"]
+            self.kekule_pools = []
+            for index, ((ns, ne), (es, ee)) in enumerate(zip(self.node_idx_array, self.edge_idx_array)):
+                variants, record = kekule_variants(
+                    self.atom_states[ns:ne], self.bond_idxs[es:ee],
+                    self.bond_types[es:ee], self.bond_aromatic_flags[es:ee], metadata,
+                    attempts=self.kekule_augmentation_variants, seed=17041 + index,
+                )
+                self.kekule_pools.append(variants)
+                self.kekule_augmentation_report.append(record)
 
         # Load and set up conditioning if enabled
         if self.conditioning_enabled and self.target_property:
@@ -312,6 +336,15 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         # get data pertaining to edges for this molecule
         bond_types = self.bond_types[edge_start_idx:edge_end_idx].int()
+        if self.kekule_pools is not None:
+            pool = self.kekule_pools[idx]
+            # Worker RNG is seeded by the DataLoader (or paired comparison
+            # runner). Isolate this draw so enabling the augmentation does not
+            # change x_0/noise for the same paired example in another arm.
+            # Never change stored DB tensors or validation targets.
+            with torch.random.fork_rng(devices=[]):
+                variant = int(torch.randint(len(pool), (1,)))
+            bond_types = pool[variant].clone().int()
         bond_idxs = self.bond_idxs[edge_start_idx:edge_end_idx].long()
         if self.bond_connectivity_weights is not None:
             bond_connectivity_weights = self.bond_connectivity_weights[

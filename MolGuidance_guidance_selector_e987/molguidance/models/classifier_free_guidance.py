@@ -9,9 +9,47 @@ from molguidance.models.flowmol import FlowMol
 from molguidance.data_processing.utils import get_batch_idxs, get_upper_edge_mask, build_edge_idxs, get_edge_batch_idxs
 from molguidance.analysis.molecule_builder import SampledMolecule
 from molguidance.models.ctmc_vector_field import CTMCVectorField
+from molguidance.models.mask_ctmc import frozen_mask_transition
 
 
 CATEGORICAL_PROBABILITY_MODES = ("corrected", "legacy")
+
+
+def guided_rate_endpoint(p_u, p_c, weight, temperature, form, location, support=None):
+    """Return endpoint probabilities and the mask exit-rate multiplier.
+
+    Probability guidance normalizes BEFORE rate construction. Rate guidance
+    combines nonnegative rates, so its total exit rate may also change.
+    """
+    if location not in {"probabilities", "rate_matrix"}:
+        raise ValueError("where_to_apply_guide must be probabilities or rate_matrix")
+    if (not torch.isfinite(torch.as_tensor(weight))
+            or not torch.isfinite(torch.as_tensor(temperature)) or temperature <= 0):
+        raise ValueError("guidance weight and positive temperature must be finite")
+    if support is not None:
+        support = support.to(device=p_u.device, dtype=torch.bool)
+        if support.shape != (p_u.shape[-1],) or not support.any():
+            raise ValueError("class support must select at least one real class")
+    if location == "probabilities":
+        values = combine_guided_endpoint_probabilities(
+            p_u, p_c, weight, temperature=temperature, guidance_format=form)
+    else:
+        # Temperature is already applied to p_u/p_c in the caller.
+        if form == "linear":
+            values = ((1 - weight) * p_u + weight * p_c).clamp_min(0)
+        elif form == "log":
+            tiny = torch.finfo(p_u.dtype).tiny
+            values = ((1 - weight) * p_u.clamp_min(tiny).log()
+                      + weight * p_c.clamp_min(tiny).log()).exp()
+            values = values.masked_fill((p_u == 0) & (p_c == 0), 0)
+        else:
+            raise ValueError("guidance_format must be linear or log")
+    if support is not None:
+        values = values.masked_fill(~support, 0)
+    total = values.sum(-1, keepdim=True)
+    if not torch.isfinite(values).all() or (total <= 0).any():
+        raise ValueError("guided rate distribution has non-finite or zero total mass")
+    return values / total, total if location == "rate_matrix" else torch.ones_like(total)
 
 
 def _project_to_probability_simplex(values: torch.Tensor) -> torch.Tensor:
@@ -397,6 +435,8 @@ class ClassifierFreeGuidance(FlowMol):
         collect_categorical_trace: bool = False,
         residual_mask_policy: str = "reject",
         dataset_name: str = "qm9",
+        joint_decoding: dict | None = None,
+        joint_required_atoms=None,
          **kwargs):   
         """
         Sample molecules with classifier-free guidance.
@@ -488,6 +528,13 @@ class ClassifierFreeGuidance(FlowMol):
                 residual_mask_policy=residual_mask_policy,
                 exclude_charges=self.exclude_charges))
 
+        if joint_decoding is not None:
+            if not self.use_joint_atom_state or self.n_bond_types != 4:
+                raise ValueError("joint decoding requires joint-state/Kekule vocabulary")
+            from molguidance.analysis.joint_decode import attach_joint_decoding
+            for i, sample in enumerate(molecules):
+                attach_joint_decoding(sample, self.atom_state_vocab, joint_decoding,
+                                      None if joint_required_atoms is None else int(joint_required_atoms[i]))
         return molecules    
 
     def sample_random_sizes(self, n_molecules: int, device="cuda:0",
@@ -545,6 +592,8 @@ class ClassifierFreeGuidance(FlowMol):
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \
                 f"{len(atoms_per_molecule)} != {len(multilple_values_to_one_property)}"
 
+        if kwargs.get("joint_decoding") is not None:
+            kwargs["joint_required_atoms"] = real_atoms_per_molecule.tolist()
         return self.sample(atoms_per_molecule, 
             n_timesteps=n_timesteps,
             device=device,  
@@ -885,6 +934,11 @@ class CFGVectorField(CTMCVectorField):
             elif dfm_type == 'campbell_rate_matrix':
                 uncond_val = uncond_pred[feat]
                 cond_val = cond_pred[feat]
+                if class_support_mask is not None:
+                    # Mask logits BEFORE softmax, so a very large forbidden
+                    # logit cannot underflow every supported probability.
+                    uncond_val = uncond_val.masked_fill(~class_support_mask, -torch.inf)
+                    cond_val = cond_val.masked_fill(~class_support_mask, -torch.inf)
 
                 if where_to_apply_guide == "probabilities":
                     p_1_given_t_uncond = F.softmax(uncond_val, dim=-1)
@@ -914,6 +968,21 @@ class CFGVectorField(CTMCVectorField):
                     class_support_mask=class_support_mask,
                 )
 
+            if last_step:
+                # Save the actual endpoint distribution for optional FINAL MAP
+                # decoding. Never overwrite raw endpoint samples or the kernel.
+                if dfm_type == "campbell_rate_matrix":
+                    p_s_1, _ = guided_rate_endpoint(
+                        p_1_given_t_uncond, p_1_given_t_cond,
+                        guide_weight, temperature, guidance_format,
+                        where_to_apply_guide, class_support_mask,
+                    )
+                saved = p_s_1.detach()
+                if feat == "e":
+                    saved = saved.new_zeros(g.num_edges(), saved.shape[-1])
+                    saved[upper_edge_mask] = p_s_1.detach()
+                    saved[~upper_edge_mask] = p_s_1.detach()
+                data_src[f"{feat}_endpoint_probs"] = saved
             # Handle edge features
             if feat == 'e':
                 e_t = torch.zeros_like(g.edata['e_t'])
@@ -957,126 +1026,36 @@ class CFGVectorField(CTMCVectorField):
                                         temperature: float = 1.0,
                                         class_support_mask: torch.Tensor | None = None,
                                         ): 
+        """Support-preserving CFG with a frozen-star CTMC exponential.
+
+        No entry-wise clipping of I+dt*Q, no spurious transitions from log(0),
+        and no argmax/temperature override at the last endpoint. The signature
+        keeps legacy logit arguments for caller/checkpoint compatibility.
         """
-        Modified campbell_step that applies CFG to rate matrices (paper's approach)
-        Args:
-            p_1_given_t_uncond: Unconditional model predictions probabilities
-            p_1_given_t_cond: Conditional model predictions probabilities
-            xt: Current state indices [N]
-            guide_weight: CFG guidance weight
-            uncond_val: Unconditional model's prediction value before applying softmax converted to probabilities
-            cond_val: Conditional model's prediction value before applying softmax converted to probabilities
-            last_step: Whether this is the last step of integration
-            eps: Small value to avoid log(0)
-            guidance_format: 'linear' or 'log' for combining rate matrices
-            where_to_apply_guide: 'probabilities' or 'rate_matrix' to apply guidance
-        """
-        device = xt.device
-        # print(f"xt shape: {xt.shape}\n")
-
-        if where_to_apply_guide == "rate_matrix":
-            # Step 1: Compute separate rate matrices for unconditional and conditional
-            R_t_uncond = CFGVectorField._compute_rate_matrix(p_1_given_t_uncond, xt, alpha_t, alpha_t_prime, 
-                                                stochasticity, mask_index, n_classes)
-            R_t_cond = CFGVectorField._compute_rate_matrix(p_1_given_t_cond, xt, alpha_t, alpha_t_prime,
-                                                stochasticity, mask_index, n_classes)
-
-            if guidance_format == "log":      
-                # Step 2: Combine rate matrices with guidance
-                R_t_guided = torch.exp(
-                    (1 - guide_weight) * torch.log(R_t_uncond + eps) + 
-                    guide_weight * torch.log(R_t_cond + eps)
-                )
-            elif guidance_format == "linear":
-                R_t_guided = (1 - guide_weight) * R_t_uncond + guide_weight * R_t_cond
-            else:
-                raise ValueError(f"Invalid guidance_format: {guidance_format}. Choose 'linear' or 'log'.")
-        
-        elif where_to_apply_guide == "probabilities":
-            if guidance_format == "log":
-                log_p_uncond = torch.log(p_1_given_t_uncond + eps)
-                log_p_cond = torch.log(p_1_given_t_cond + eps)
-                log_p_guided = (1 - guide_weight) * log_p_uncond + guide_weight * log_p_cond
-                log_p_guided = log_p_guided - torch.logsumexp(log_p_guided, dim=-1, keepdim=True)
-                p_s_1 = torch.softmax(log_p_guided / max(float(temperature), eps), dim=-1)
-            elif guidance_format == "linear":
-                p_s_1 = (1 - guide_weight) * p_1_given_t_uncond + guide_weight * p_1_given_t_cond
-                p_s_1 = p_s_1.clamp_min(eps)
-                p_s_1 = p_s_1 / p_s_1.sum(dim=-1, keepdim=True).clamp_min(eps)
-                p_s_1 = torch.softmax(torch.log(p_s_1) / max(float(temperature), eps), dim=-1)
-            else:
-                raise ValueError(f"Invalid guidance_format: {guidance_format}. Choose 'linear' or 'log'.")
-            R_t_guided = CFGVectorField._compute_rate_matrix(p_s_1, xt, alpha_t, alpha_t_prime,
-                                                stochasticity, mask_index, n_classes)
-
+        if n_classes != mask_index + 1 or p_1_given_t_cond.shape[-1] != mask_index:
+            raise ValueError("mask must follow the real categorical vocabulary")
         if class_support_mask is not None:
-            class_support_mask = class_support_mask.to(
-                device=device, dtype=torch.bool
-            )
-            if class_support_mask.shape != (mask_index,):
-                raise ValueError(
-                    f'class support mask must have shape ({mask_index},), '
-                    f'got {tuple(class_support_mask.shape)}'
-                )
-            R_t_guided[:, :mask_index].masked_fill_(
-                ~class_support_mask.unsqueeze(0), 0.0
-            )
-        # Step 3: Re-normalize rate matrix (diagonal = -row_sum)
-        R_t_guided.scatter_(-1, xt.unsqueeze(-1), 0.0)  # Clear diagonal
-        row_sums = R_t_guided.sum(dim=-1, keepdim=True)
-        R_t_guided.scatter_(-1, xt.unsqueeze(-1), -row_sums)  # Set diagonal
-
-        # Step 4: Convert to transition probabilities
-        step_probs = (R_t_guided * dt).clamp(min=0.0, max=1.0)
-
-        # Ensure probability conservation
-        step_probs.scatter_(-1, xt.unsqueeze(-1), 0.0)
-        stay_probs = (1.0 - step_probs.sum(dim=-1, keepdim=True)).clamp(min=0.0)
-        step_probs.scatter_(-1, xt.unsqueeze(-1), stay_probs)   
-        step_probs = torch.clamp(step_probs, min=0.0, max=1.0)     
-
-        # Step 5: Handle last step
+            support = class_support_mask.to(device=xt.device, dtype=torch.bool)
+            if support.shape != (mask_index,) or not support.any():
+                raise ValueError("class support must select at least one real class")
+            scale = temperature if where_to_apply_guide == "rate_matrix" else 1.
+            p_1_given_t_uncond = F.softmax(uncond_val.masked_fill(~support, -torch.inf) / scale, -1)
+            p_1_given_t_cond = F.softmax(cond_val.masked_fill(~support, -torch.inf) / scale, -1)
+        endpoint, rate_multiplier = guided_rate_endpoint(
+            p_1_given_t_uncond, p_1_given_t_cond, guide_weight, temperature,
+            guidance_format, where_to_apply_guide, class_support_mask)
+        x1 = Categorical(endpoint).sample()
         if last_step:
-            # For last step, create guided logits with S+1 dimensions
-            guided_logits_full = torch.zeros(uncond_val.shape[0], n_classes, device=device)
-            guided_logits_full[:, :uncond_val.shape[-1]] = (1 - guide_weight) * uncond_val + guide_weight * cond_val
-            if class_support_mask is not None:
-                guided_logits_full[:, :mask_index].masked_fill_(
-                    ~class_support_mask.unsqueeze(0), -1e9)
-            guided_logits_full[:, mask_index] = -1e9 # Never choose mask in final step
-            
-            is_masked = (xt == mask_index)
-            xt_new = xt.clone()
-            xt_new[is_masked] = guided_logits_full[is_masked].argmax(-1)
+            xt_new = torch.where(xt == mask_index, x1, xt)
         else:
+            if not 0 <= float(alpha_t) < 1 or float(alpha_t_prime) < 0:
+                raise ValueError("nonterminal mask schedule must have 0<=alpha<1 and alpha_prime>=0")
+            factor = (alpha_t_prime + stochasticity * alpha_t) / (1 - alpha_t)
+            step_probs = frozen_mask_transition(
+                endpoint * rate_multiplier * factor, stochasticity, xt, dt)
             xt_new = Categorical(step_probs).sample()
-
-        LARGE_NEG = -1e9
-        
-        log_p_uncond_full = torch.full((p_1_given_t_uncond.shape[0], n_classes), LARGE_NEG, device=device)
-        log_p_cond_full = torch.full((p_1_given_t_cond.shape[0], n_classes), LARGE_NEG, device=device)
-        
-        log_p_uncond_full[:, :p_1_given_t_uncond.shape[-1]] = torch.log(p_1_given_t_uncond + eps)
-        log_p_cond_full[:, :p_1_given_t_cond.shape[-1]] = torch.log(p_1_given_t_cond + eps)
-
-        log_p_guided = (1 - guide_weight) * log_p_uncond_full + guide_weight * log_p_cond_full # just for x1 for visualization
-        if class_support_mask is not None:
-            log_p_guided[:, :mask_index].masked_fill_(
-                ~class_support_mask.unsqueeze(0), LARGE_NEG)
-
-        # Debug: Check for NaN before softmax
-        if torch.isnan(log_p_guided).any():
-            print("Warning: NaN detected in log_p_guided before softmax!")
-            print(f"guide_weight: {guide_weight}")
-            print(f"log_p_uncond_full stats: min={log_p_uncond_full.min()}, max={log_p_uncond_full.max()}, has_nan={torch.isnan(log_p_uncond_full).any()}")
-            print(f"log_p_cond_full stats: min={log_p_cond_full.min()}, max={log_p_cond_full.max()}, has_nan={torch.isnan(log_p_cond_full).any()}")
-        
-        x1 = Categorical(F.softmax(log_p_guided, dim=-1)).sample() 
-
-        xt_new = F.one_hot(xt_new, num_classes=n_classes).float()
-        x1 = F.one_hot(x1, num_classes=n_classes).float()
-        
-        return xt_new, x1
+        return (F.one_hot(xt_new, n_classes).float(),
+                F.one_hot(x1, n_classes).float())
 
     @staticmethod # adapted from https://github.com/hnisonoff/discrete_guidance/blob/main/src/fm_utils.py
     def _compute_rate_matrix(p_1_given_t: torch.Tensor, xt: torch.Tensor,

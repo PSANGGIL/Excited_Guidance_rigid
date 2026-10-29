@@ -46,11 +46,9 @@ class TestEMAUpdateHook(unittest.TestCase):
         optimizer.zero_grad()
         loss = model.vector_field(torch.ones(1, 1)).sum()
         loss.backward()
-        optimizer.step()
-
         ema_before = model.ema_vector_field.weight.detach().clone()
+        model.optimizer_step(0, 0, optimizer)
         online_after_step = model.vector_field.weight.detach().clone()
-        model.on_before_zero_grad(optimizer)
         ema_after = model.ema_vector_field.weight.detach().clone()
 
         expected = ema_before * 0.9999 + online_after_step * 0.0001

@@ -1,5 +1,17 @@
 # MolGuidance
 
+## Local HP1KG Stage 8 — joint decoding and verified training paths
+
+브랜치 `feature/molguidance-stage8-joint-decoding-mg-budget`:
+전역 atom/H/charge–Kekulé–connectivity 최종 solver, noise 생성 전 동일 분자
+Kekulé 표현 증강, MG soft target/EMA, 실제 edge-budget batching, correction
+안전장치 및 regularization 설정을 추가했습니다.
+전체 DB codec identity **1,581/1,581**, 회귀 테스트 **110개**,
+10개 설정의 실제 GPU optimizer/checkpoint/generation 연결 검사를 통과했습니다.
+이는 장기학습의 생성 품질 개선을 입증한 결과는 아닙니다.
+[Stage 8 수식·구현·검증·실행 기록](docs/STAGE8_JOINT_CONSISTENCY_20261020.md)을
+참고하십시오. 원본 DB와 이전 checkpoint/생성/XTB 결과는 변경하지 않았습니다.
+
 ## Local HP1KG Stage 7 — fixed-data consistency experiment
 
 새 브랜치 `feature/molguidance-stage7-fixed-data-consistency`에서 HP1KG 1,581개와

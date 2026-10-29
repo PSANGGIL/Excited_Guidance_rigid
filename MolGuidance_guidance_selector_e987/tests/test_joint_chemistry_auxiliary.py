@@ -84,6 +84,8 @@ class JointChemistryAuxiliaryTests(unittest.TestCase):
     def test_oracle_benzene_has_near_zero_loss(self):
         graph, upper_classes = _complete_benzene(masked=True)
         node_logits, edge_logits = _oracle_logits(upper_classes)
+        node_logits.requires_grad_()
+        edge_logits.requires_grad_()
         losses = _chemistry_loss()(
             graph,
             node_logits,
@@ -104,6 +106,58 @@ class JointChemistryAuxiliaryTests(unittest.TestCase):
             with self.subTest(loss=name):
                 self.assertTrue(torch.isfinite(value))
                 self.assertLess(float(value), 1.0e-6)
+        sum(losses.values()).backward()
+        self.assertTrue(torch.isfinite(node_logits.grad).all())
+        self.assertTrue(torch.isfinite(edge_logits.grad).all())
+
+    def test_saturated_edge_logits_have_finite_gradients_even_when_inactive(self):
+        for masked in (False, True):
+            for incorrect in (False, True):
+                with self.subTest(masked=masked, incorrect=incorrect):
+                    graph, classes = _complete_benzene(masked=masked)
+                    nodes, edges = _oracle_logits(classes)
+                    if incorrect:
+                        edges = -edges
+                    edges = (edges * 50.).requires_grad_()
+                    nodes.requires_grad_()
+                    losses = _chemistry_loss()(graph, nodes, edges, get_upper_edge_mask(graph))
+                    total = sum(losses.values())
+                    self.assertTrue(torch.isfinite(total))
+                    total.backward()
+                    self.assertTrue(torch.isfinite(nodes.grad).all())
+                    self.assertTrue(torch.isfinite(edges.grad).all())
+
+    def test_log_space_existence_matches_clipped_binary_objective_and_gradient(self):
+        graph, classes = _complete_benzene(masked=True)
+        generator = torch.Generator().manual_seed(105)
+        nodes = torch.randn(6, 2, generator=generator, dtype=torch.float64)
+        edges = torch.randn(len(classes), 4, generator=generator, dtype=torch.float64,
+                            requires_grad=True)
+        module = _chemistry_loss().double()
+        weights = torch.tensor([.37], dtype=torch.float64)
+        actual = module(graph, nodes, edges, get_upper_edge_mask(graph), weights)["chem_edge_existence"]
+        q = (1. - edges.softmax(-1)[:, 0]).clamp(module.eps, 1. - module.eps)
+        positive = classes != 0
+        reference = .5 * weights[0] * (-q[positive].log().mean() - torch.log1p(-q[~positive]).mean())
+        actual_grad = torch.autograd.grad(actual, edges, retain_graph=True)[0]
+        reference_grad = torch.autograd.grad(reference, edges)[0]
+        torch.testing.assert_close(actual, reference, rtol=1e-10, atol=1e-12)
+        torch.testing.assert_close(actual_grad, reference_grad, rtol=1e-10, atol=1e-12)
+
+    def test_probability_floor_is_preserved_for_saturated_wrong_predictions(self):
+        import math
+        graph, classes = _complete_benzene(masked=True)
+        nodes, _ = _oracle_logits(classes)
+        edges = torch.full((len(classes), 4), -1000.)
+        # Predict NONE for every bond, and a SINGLE for every non-bond.
+        wrong_class = torch.where(classes != 0, torch.zeros_like(classes), torch.ones_like(classes))
+        edges.scatter_(1, wrong_class[:, None], 1000.)
+        edges.requires_grad_()
+        module = _chemistry_loss()
+        loss = module(graph, nodes, edges, get_upper_edge_mask(graph))["chem_edge_existence"]
+        self.assertAlmostEqual(float(loss.detach()), -math.log(module.eps), places=5)
+        loss.backward()
+        self.assertTrue(torch.isfinite(edges.grad).all())
 
     def test_no_bond_prediction_is_penalized(self):
         graph, upper_classes = _complete_benzene(masked=True)

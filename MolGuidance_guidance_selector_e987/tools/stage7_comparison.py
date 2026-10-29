@@ -32,10 +32,12 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 import yaml
 
 from molguidance.data_processing.dataset import collate
+from molguidance.data_processing.edge_budget import EdgeBudgetBatchSampler
 from molguidance.model_utils.load import read_config_file, data_module_from_config
 from molguidance.model_utils.load_with_guidance import model_from_config_with_guidance
 from molguidance.model_utils.provenance import data_manifest, verify_manifest, sha256_file
 from molguidance.models.classifier_free_guidance import ClassifierFreeGuidance
+from molguidance.models.model_guidance_scale import ModelGuidance
 from molguidance.models.correction import correction_losses
 from molguidance.analysis.generation_callback import GenerationValidation
 from tools.attach_stage7_condition_results import attach
@@ -48,6 +50,8 @@ STAGES = (
     "00_stage6_control", "01a_legacy_loss_control", "01_contracts",
     "01b_unweighted_loss_control", "02_feedback", "03_distribution", "04_correction",
 )
+STAGE8 = ("00_control", "01_distribution", "01a_kekule_augmentation", "02_correction", "03_dropout",
+          "04_weight_decay", "05_small_model", "06_condition_scale", "07_mg")
 
 
 def now():
@@ -74,6 +78,7 @@ def event(root, **values):
 def source_hashes():
     paths = list((PROJECT / "molguidance").rglob("*.py"))
     paths += list((PROJECT / "configs/local/stage7").glob("*.yaml"))
+    paths += list((PROJECT / "configs/local/stage8").glob("*.yaml"))
     paths += [Path(__file__), PROJECT / "tools/attach_stage7_condition_results.py",
               PROJECT / "tools/joint_xtb_stda_pipeline.py",
               PROJECT / "tools/joint_xtb_stda_diffusion_coords.py"]
@@ -109,16 +114,27 @@ class PairedDataset(Dataset):
 
 
 class PairedBatches(Sampler):
-    def __init__(self, size, batch_size, seed):
+    def __init__(self, size, batch_size, seed, budget_sampler=None, advance_epoch=True):
         self.size, self.batch_size, self.seed = int(size), int(batch_size), int(seed)
         self.epoch = 0
+        self.budget_sampler, self.advance_epoch = budget_sampler, advance_epoch
 
     def __len__(self):
+        if self.budget_sampler is not None:
+            return len(self.budget_sampler)
         return math.ceil(self.size / self.batch_size)
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch) if self.advance_epoch else 0
 
     def __iter__(self):
         epoch = self.epoch
-        self.epoch += 1
+        self.epoch += int(self.advance_epoch)
+        if self.budget_sampler is not None:
+            self.budget_sampler.set_epoch(epoch)
+            for batch in self.budget_sampler:
+                yield [(epoch, index) for index in batch]
+            return
         order = torch.randperm(
             self.size, generator=torch.Generator().manual_seed(self.seed + epoch)
         ).tolist()
@@ -198,6 +214,12 @@ def config_for(root, stage, batch_size):
     config["training"]["evaluation"]["generation"]["enabled"] = False
     # Common step-based warmup and LR for every arm; documented screening override.
     batches_per_epoch = math.ceil(1264 / batch_size)
+    if config["training"].get("max_num_edges") is not None:
+        original = torch.load(DATA / "train_data_processed.pt", map_location="cpu", weights_only=False)
+        counts = original["node_idx_array"][:, 1] - original["node_idx_array"][:, 0]
+        batches_per_epoch = len(EdgeBudgetBatchSampler(
+            counts, batch_size, config["training"]["max_num_edges"],
+            fake_fraction=config["mol_fm"].get("fake_atom_fraction", 0.)))
     config["lr_scheduler"]["warmup_length"] = spec["warmup_steps"] / batches_per_epoch
     config["lr_scheduler"]["base_lr"] = .0014 * batch_size / 640.
     config["training"]["output_dir"] = str(root / "stages" / stage)
@@ -208,7 +230,11 @@ def probe(root, batch_size):
     check_contract(root)
     configure_cuda()
     torch.manual_seed(17041)
-    config = config_for(root, "04_correction", batch_size)
+    spec = check_contract(root)
+    config = config_for(root, "07_mg" if spec.get("config_family") == "stage8" else "04_correction", batch_size)
+    if spec.get("config_family") == "stage8":
+        config["guidance"].update(mg_start_step=0, data_ratio=1., p_uncond=0.)
+        config["mol_fm"]["correction"].update(start_step=0, warmup_steps=0)
     model = model_from_config_with_guidance(config).cuda().train()
     dm = data_module_from_config(config)
     dm.setup("fit")
@@ -216,6 +242,10 @@ def probe(root, batch_size):
     sizes = dataset.node_idx_array[:, 1] - dataset.node_idx_array[:, 0]
     # A conservative batch: largest real molecules, not an easy random batch.
     indices = torch.argsort(sizes, descending=True)[:batch_size].tolist()
+    if config["training"].get("max_num_edges") is not None:
+        sampler = EdgeBudgetBatchSampler.from_dataset(
+            dataset, batch_size, config["training"]["max_num_edges"], shuffle=False)
+        indices = max(list(sampler), key=lambda batch: int(sampler.costs[batch].sum()))
     paired = PairedDataset(dataset, 17041)
     batch = collate([paired[(0, index)] for index in indices]).to("cuda")
     # DGL's .to() does not copy arbitrary Python graph attributes.
@@ -266,15 +296,23 @@ def train(root, stage, batch_size):
     worker_kwargs = dict(num_workers=spec["data_workers"])
     if spec["data_workers"]:
         worker_kwargs.update(multiprocessing_context="spawn", persistent_workers=True)
+    budget = config["training"].get("max_num_edges")
+    train_budget = None if budget is None else EdgeBudgetBatchSampler.from_dataset(
+        dm.train_dataset, batch_size, budget, seed=spec["seed"])
     train_loader = DataLoader(
         PairedDataset(dm.train_dataset, spec["seed"]),
-        batch_sampler=PairedBatches(len(dm.train_dataset), batch_size, spec["seed"]),
+        batch_sampler=PairedBatches(len(dm.train_dataset), batch_size, spec["seed"], train_budget),
         collate_fn=collate, generator=torch.Generator().manual_seed(spec["seed"]),
         **worker_kwargs,
     )
+    val_budget = None if budget is None else EdgeBudgetBatchSampler.from_dataset(
+        dm.val_dataset, min(batch_size, 32), budget, shuffle=False)
     val_loader = DataLoader(
         PairedDataset(dm.val_dataset, spec["seed"] + 20_000_000),
-        batch_size=min(batch_size, 32), shuffle=False, collate_fn=collate,
+        collate_fn=collate,
+        **(dict(batch_size=min(batch_size, 32), shuffle=False) if val_budget is None else
+           dict(batch_sampler=PairedBatches(len(dm.val_dataset), min(batch_size, 32),
+                                           spec["seed"], val_budget, advance_epoch=False))),
         generator=torch.Generator().manual_seed(spec["seed"]), **worker_kwargs,
     )
     best = ModelCheckpoint(
@@ -309,7 +347,9 @@ def evaluate(root, stage):
     configure_cuda()
     directory = root / "stages" / stage
     ckpt = directory / "checkpoints/matched_steps_final.ckpt"
-    model = ClassifierFreeGuidance.load_from_checkpoint(ckpt, map_location="cpu", weights_only=False).cuda().eval()
+    config = read_config_file(directory / "config.yaml")
+    cls = ModelGuidance if config["guidance"]["guidance_type"] == "model_guidance" else ClassifierFreeGuidance
+    model = cls.load_from_checkpoint(ckpt, map_location="cpu", weights_only=False).cuda().eval()
     panels = []
     for seed in (spec["seed"], spec["seed"] + 1):
         for label, target in (("validation", None), ("est0", 0.)):
@@ -317,6 +357,7 @@ def evaluate(root, stage):
             callback = GenerationValidation(
                 output, DATA, n_samples=spec["samples_per_panel"], batch_size=8,
                 n_timesteps=spec["time_points"], seed=seed, target_est_eV=target,
+                joint_decoding=config["training"]["evaluation"]["generation"].get("joint_decoding"),
             )
             report = callback.evaluate(model, epoch=0, step=spec["steps"])
             report_path = next(output.rglob("report.json"))
@@ -499,8 +540,9 @@ def launch(args):
     root.mkdir(parents=True, exist_ok=False)
     for name in ("logs", "config_sources", "probes"):
         (root / name).mkdir()
-    for stage in STAGES:
-        config = read_config_file(PROJECT / "configs/local/stage7" / f"{stage}.yaml")
+    family_stages = STAGE8 if args.config_family == "stage8" else STAGES
+    for stage in family_stages:
+        config = read_config_file(PROJECT / "configs/local" / args.config_family / f"{stage}.yaml")
         with (root / "config_sources" / f"{stage}.yaml").open("x") as stream:
             yaml.safe_dump(config, stream)
     spec = dict(
@@ -510,7 +552,8 @@ def launch(args):
         seed=args.seed, warmup_steps=min(100, max(args.steps // 4, 1)),
         batch_candidates=args.batch_candidates, data_workers=args.data_workers,
         samples_per_panel=args.samples_per_panel, time_points=args.time_points,
-        stages=args.stages, xtb_env=str(args.xtb_env), xtb_workers=4,
+        stages=args.stages or list(family_stages), config_family=args.config_family,
+        xtb_env=str(args.xtb_env), xtb_workers=4,
         calculation_command_timeout_s=600, precision="32-true",
         intended_samples_per_arm=4 * args.samples_per_panel,
         purpose="bounded from-scratch ablation screening; not convergence/production training",
@@ -538,10 +581,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["launch", "orchestrate", "probe", "train", "evaluate", "xtb"], required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--stage", choices=STAGES)
+    parser.add_argument("--config-family", choices=["stage7", "stage8"], default="stage7")
+    parser.add_argument("--stage", choices=STAGES + STAGE8)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--steps", type=int, default=600)
-    parser.add_argument("--stages", choices=STAGES, nargs="+", default=list(STAGES))
+    parser.add_argument("--stages", choices=STAGES + STAGE8, nargs="+")
     parser.add_argument("--batch-candidates", type=int, nargs="+", default=[256, 128, 64])
     parser.add_argument("--seed", type=int, default=17041)
     parser.add_argument("--samples-per-panel", type=int, default=32)
@@ -549,6 +593,9 @@ def main():
     parser.add_argument("--data-workers", type=int, default=4)
     parser.add_argument("--xtb-env", type=Path, default=Path("/home/jovyan/cpu-only-1-datavol-1/xtb_env"))
     args = parser.parse_args()
+    family_stages = STAGE8 if args.config_family == "stage8" else STAGES
+    if args.mode == "launch" and args.stages and any(s not in family_stages for s in args.stages):
+        parser.error("stage selection does not belong to the requested config family")
     if (args.steps < 1 or args.samples_per_panel < 1 or args.time_points < 2
             or args.data_workers < 0 or min(args.batch_candidates) < 1):
         parser.error("invalid test dimensions")

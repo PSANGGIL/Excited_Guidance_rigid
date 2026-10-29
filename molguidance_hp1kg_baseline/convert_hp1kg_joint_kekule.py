@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
             "molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz"
         ),
     )
-    parser.add_argument("--property", choices=("s1", "t1", "est"), default="est")
+    parser.add_argument("--property", choices=("s1", "t1", "est", "s1_minus_2t1"), default="est")
     return parser.parse_args()
 
 
@@ -209,10 +209,11 @@ def rebuild_molecule(
 
 
 def property_value(record: dict[str, Any], property_name: str) -> float:
-    if property_name == "est":
+    if property_name in ("est", "s1_minus_2t1"):
+        triplet_coefficient = 1.0 if property_name == "est" else 2.0
         value = float(
             torch.tensor(record["s1"], dtype=torch.float32)
-            - torch.tensor(record["t1"], dtype=torch.float32)
+            - triplet_coefficient * torch.tensor(record["t1"], dtype=torch.float32)
         )
     else:
         value = float(record[property_name])
@@ -448,6 +449,9 @@ def main() -> None:
         "source": str(source),
         "output": str(output),
         "property": args.property,
+        "property_definition": {"s1": "S1", "t1": "T1", "est": "S1 - T1",
+                                "s1_minus_2t1": "S1 - 2*T1"}[args.property],
+        "property_units": "eV",
         "chemistry_representation": "joint_atom_state+kekule_bond",
         "atom_map": atom_map,
         "atom_state_count": len(metadata["states"]),

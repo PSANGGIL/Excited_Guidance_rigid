@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import dgl
 import torch
 import torch.nn as nn
@@ -89,8 +91,8 @@ class JointChemistryAuxiliaryLoss(nn.Module):
             raise ValueError(
                 "every train-supported state needs a normalized valence distribution"
             )
-        if eps <= 0:
-            raise ValueError("eps must be positive")
+        if not math.isfinite(eps) or not 0 < eps < 0.5:
+            raise ValueError("eps must be finite and in (0, 0.5)")
 
         self.eps = float(eps)
         self.register_buffer("state_charges", state_charges, persistent=False)
@@ -188,19 +190,23 @@ class JointChemistryAuxiliaryLoss(nn.Module):
                 g, node_logits, edge_logits, upper_edge_mask
             )
         )
-        predicted_edge = F.softmax(edge_logits, dim=-1)
         target_edge_class = g.edata["e_1_true"][upper_edge_mask].argmax(dim=-1)
         target_edge_exists = target_edge_class != 0
 
         # Balanced binary edge-existence loss on unknown pairs only. This is an
         # auxiliary view of the same joint edge state, not an independent head.
-        predicted_edge_exists = (1.0 - predicted_edge[:, 0]).clamp(
-            self.eps, 1.0 - self.eps
-        )
-        existence_nll = torch.where(
+        # Evaluate the SAME clipped binary likelihood in log space. In FP32,
+        # 1 - eps can round to 1 and 1 - p(NONE) can also become exactly 1.
+        # Computing both torch.where branches then creates log1p(-1), whose
+        # backward is NaN even when that branch or edge is masked out.
+        edge_log_probabilities = F.log_softmax(edge_logits, dim=-1)
+        selected_log_probability = torch.where(
             target_edge_exists,
-            -torch.log(predicted_edge_exists),
-            -torch.log1p(-predicted_edge_exists),
+            torch.logsumexp(edge_log_probabilities[:, 1:], dim=-1),
+            edge_log_probabilities[:, 0],
+        )
+        existence_nll = -selected_log_probability.clamp(
+            min=math.log(self.eps), max=math.log1p(-self.eps)
         )
         edge_item_weights = graph_weights[upper_edge_batch_idx]
         positive_loss = _weighted_mean(
@@ -297,7 +303,7 @@ class JointChemistryAuxiliaryLoss(nn.Module):
         connectivity_weight = g.edata["e_connectivity_weight"][
             upper_edge_mask
         ].to(edge_logits.dtype)
-        if connectivity_weight.shape != predicted_edge_exists.shape:
+        if connectivity_weight.shape != target_edge_exists.shape:
             raise ValueError("connectivity weights do not align with upper edges")
         if not torch.isfinite(connectivity_weight).all() or bool(
             (connectivity_weight < 0).any()

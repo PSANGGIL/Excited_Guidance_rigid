@@ -12,6 +12,10 @@ from molguidance.models.classifier_free_guidance import ZerosEmbedding
 import copy
 import numpy as np
 import random
+import math
+from molguidance.models.mg_targets import soft_guided_target
+from molguidance.models.loss_utils import reduce_categorical_loss
+from molguidance.models.correction import correction_losses
 
 
 def _mg_feature_slices(feat: str, node_counts: List[int]) -> List[slice]:
@@ -38,8 +42,9 @@ class ModelGuidance(FlowMol):
     Extended FlowMol model with Model Guidance capabilities, based on the paper
     "Diffusion Models without Classifier-free Guidance".
     
-    During training, it directly learns the guided distribution by modifying the output
-    with the guidance term. 
+    The coordinate objective follows MG-style detached teacher shifts. The
+    categorical branch is an explicit probability-space distillation extension,
+    not an assertion that the continuous MG theorem applies to class logits.
     
     During sampling, only conditional generation is used with a single forward pass,
     eliminating the need for the two forward passes required by CFG.
@@ -55,8 +60,16 @@ class ModelGuidance(FlowMol):
                  use_scale_aware: bool = True,
                  **kwargs):
         super().__init__(*args, **kwargs)
-        if self.correction_config["weight"] > 0:
-            raise NotImplementedError("Stage 7 correction is validated for base/CFG, not MG targets")
+        if not all(math.isfinite(v) for v in (min_scale, max_scale, drop_ratio, data_ratio, mg_high)):
+            raise ValueError("MG parameters must be finite")
+        if not 0 <= min_scale <= 1 <= max_scale or not 0 <= drop_ratio <= 1 or not 0 <= data_ratio <= 1 - drop_ratio:
+            raise ValueError("MG scale range must contain 1; drop/data ratios must sum to <= 1")
+        if not 0 <= mg_high <= 1:
+            raise ValueError("mg_high must lie in [0, 1]")
+        if int(mg_start_step) != mg_start_step:
+            raise ValueError("mg_start_step must be an integer")
+        if self.parameterization != "ctmc" or self.target_blur != 0:
+            raise ValueError("MG soft targets currently require CTMC with target_blur=0")
         
         self.min_scale = min_scale
         self.max_scale = max_scale
@@ -68,10 +81,6 @@ class ModelGuidance(FlowMol):
         self.use_scale_aware = use_scale_aware
 
         vector_field_config = dict(kwargs.get("vector_field_config", {}))
-        if vector_field_config.get("condition_residual_scale", 1.) != 1.:
-            raise NotImplementedError(
-                "Stage 7 condition-residual ablation is validated for CFG, not scale-aware MG"
-            )
         if vector_field_config.get("chemistry_feedback", False):
             vector_field_config["chemistry_state_metadata"] = self.atom_state_vocab
         vector_field_config['independent_modality_time'] = (
@@ -106,12 +115,21 @@ class ModelGuidance(FlowMol):
             p.requires_grad = False
         self.ema_vector_field.eval()
 
+    def train(self, mode=True):
+        super().train(mode)
+        # An EMA teacher is deterministic even when the student uses dropout.
+        if hasattr(self, "ema_vector_field"):
+            self.ema_vector_field.eval()
+        return self
+
     @torch.no_grad()
     def update_ema(self, ema_model, model, decay=0.9999):
         ema_params = dict(ema_model.named_parameters())
         model_params = dict(model.named_parameters())
         for name, param in model_params.items():
             ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+        for name, value in model.named_buffers():
+            dict(ema_model.named_buffers())[name].copy_(value)
 
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
         # check if self has the attribute batches_per_epoch
@@ -127,6 +145,8 @@ class ModelGuidance(FlowMol):
 
         # compute losses
         losses = self(g)
+        if self.correction_config["weight"] > 0:
+            losses.update(correction_losses(self, g))
 
         # create a dictionary of values to log
         train_log_dict = {}
@@ -142,15 +162,10 @@ class ModelGuidance(FlowMol):
 
         return total_loss
 
-    def on_before_zero_grad(self, optimizer):
-        """Update the teacher EMA once after each optimizer step.
-
-        ``on_after_optimizer_step`` is not a PyTorch Lightning hook and was never
-        called. ``on_before_zero_grad`` runs after ``optimizer.step()`` and before
-        gradients are cleared, including when gradient accumulation is enabled.
-        """
-        ema_decay = 0.9999
-        self.update_ema(self.ema_vector_field, self.vector_field, decay=ema_decay)
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure=None):
+        # Update AFTER the real step, including the final one; never at step 0.
+        super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
+        self.update_ema(self.ema_vector_field, self.vector_field, decay=0.9999)
 
     def validation_step(self, g: dgl.DGLGraph, batch_idx: int):
         return super().validation_step(g, batch_idx)
@@ -190,15 +205,19 @@ class ModelGuidance(FlowMol):
         batch_size = g.batch_size
         device = g.device
         
-        round = lambda x: int(np.ceil(x)) if (random.random() < x - int(np.floor(x))) else int(np.floor(x))
+        def rounded(x):
+            return int(math.floor(x)) + int(float(torch.rand((), device=device, generator=corruption_generator)) < x % 1)
         if condition_dropout is None:
-            condition_dropout = bool(is_training)
+            condition_dropout = bool(is_training and self.training)
         num_mg = 0
-        num_drop = round(batch_size * self.drop_ratio) if condition_dropout else 0
+        num_drop = rounded(batch_size * self.drop_ratio) if condition_dropout else 0
 
-        use_mg_loss =  is_training and self.mg_start_step >= 0 and self.global_step >= self.mg_start_step
+        use_mg_loss = is_training and self.training and self.mg_start_step >= 0 and self.global_step >= self.mg_start_step
+        if use_mg_loss and not self.use_scale_aware:
+            raise ValueError("Variable-scale MG training requires use_scale_aware=True")
         if use_mg_loss:
-            num_mg = round(batch_size * self.data_ratio) if self.use_scale_aware else (batch_size - num_drop)
+            num_mg = min(batch_size - num_drop, rounded(batch_size * self.data_ratio)) if self.use_scale_aware else (batch_size - num_drop)
+        use_mg_loss = use_mg_loss and num_mg > 0
 
         # Sample random guidance values for training
         guidance_values = torch.ones(batch_size, device=device)
@@ -206,6 +225,8 @@ class ModelGuidance(FlowMol):
             num_mg, device=device, generator=corruption_generator
         ) * (self.max_scale - self.min_scale) + self.min_scale
         guidance_values[num_mg:num_mg+num_drop] = 0.0
+        g._USE_UNCONDITIONAL_EMBEDDING = torch.zeros(batch_size, 1, device=device, dtype=torch.bool)
+        g._USE_UNCONDITIONAL_EMBEDDING[num_mg:num_mg + num_drop] = True
 
         # Check if the attribute loss_fn_dict exists
         if not hasattr(self, 'loss_fn_dict'):
@@ -276,7 +297,7 @@ class ModelGuidance(FlowMol):
 
             with torch.no_grad():
                 # Generate conditional and unconditional embeddings
-                cond_prop_emb = self.property_embedder(g.prop[:num_mg])
+                cond_prop_emb = self.ema_vector_field.property_embedder(g.prop[:num_mg])
                 uncond_prop_emb = self.unconditional_embedder(g.prop[:num_mg])
 
                 # Get batch indices for sub-graph
@@ -329,7 +350,7 @@ class ModelGuidance(FlowMol):
                 data_src = g.ndata
 
             if self.parameterization in ['endpoint', 'dirichlet', 'ctmc']:
-                target = data_src[f'{feat}_1_true']
+                target = data_src[f'{feat}_1_true'].clone()
 
             if self.parameterization == 'ctmc' and feat in self.n_cat_dict:
                 # First get the one-hot target without argmax
@@ -354,30 +375,30 @@ class ModelGuidance(FlowMol):
 
                         for i, feature_indices in enumerate(feature_slices):
                             
-                            if t[i] < self.mg_high:
+                            if graph_time[i] < self.mg_high:
                                 w_val = guidance_values[i] 
-                                if w_val > 0:
-                                    guidance_diff = vf_output_cond[feat][feature_indices] - vf_output_uncond[feat][feature_indices]
-                                    
-                                    # Add guidance and renormalize
-                                    target[feature_indices] = target[feature_indices] + w_val * guidance_diff
-                                    target[feature_indices] = F.softmax(target[feature_indices], dim=-1)
+                                target[feature_indices] = soft_guided_target(
+                                    target[feature_indices],
+                                    vf_output_cond[feat][feature_indices],
+                                    vf_output_uncond[feat][feature_indices], w_val,
+                                    self.vector_field.get_category_support_mask(feat),
+                                )
                 
                 # Convert to indices and handle masking
-                target = target.argmax(dim=-1)
+                clean_index = data_src[f'{feat}_1_true']
+                clean_index = (clean_index[upper_edge_mask] if feat == "e" else clean_index).argmax(-1)
                 
                 # Apply masking for CTMC
                 if feat == 'e':
                     xt_idxs = data_src[f'{feat}_t'][upper_edge_mask].argmax(-1)
                 else:
                     xt_idxs = data_src[f'{feat}_t'].argmax(-1)
-                target[xt_idxs != self.n_cat_dict[feat]] = -100
+                active = xt_idxs == self.n_cat_dict[feat]
 
                 support = self.vector_field.get_category_support_mask(feat)
-                if support is not None and target.ndim == 1:
-                    unsupported_target = ~support[target.clamp_min(0)]
-                    # Keep validation on the train-supported vocabulary.
-                    target[unsupported_target & (target != -100)] = -100
+                if support is not None:
+                    active = active & support[clean_index]
+                targets[f"{feat}_active"] = active
 
 
 
@@ -392,14 +413,14 @@ class ModelGuidance(FlowMol):
                         # Apply guidance term to nodes in this graph
                         if t[i] < self.mg_high:
                             w_val = guidance_values[i] 
-                            if w_val > 0:
+                            if w_val != 1:
                                 # Get corresponding node indices in the full batch
                                 node_indices = slice(total_nodes, total_nodes + num_nodes)
                                 
                                 # Get guidance difference from ema model outputs
                                 guidance_diff = vf_output_cond[feat][node_indices] - vf_output_uncond[feat][node_indices]
                                 # Apply to target
-                                target[node_indices] = target[node_indices] + w_val * guidance_diff
+                                target[node_indices] = target[node_indices] + (w_val - 1.) * guidance_diff
                         total_nodes += num_nodes
 
             targets[feat] = target
@@ -426,6 +447,20 @@ class ModelGuidance(FlowMol):
 
             # compute the losses
             target = targets[feat]
+            if self.parameterization == "ctmc" and feat in self.n_cat_dict:
+                fn = self.loss_fn_dict[feat]
+                active = targets[f"{feat}_active"]
+                ce = F.cross_entropy(vf_output[feat], target.detach(), reduction="none",
+                                     weight=fn.weight, label_smoothing=fn.label_smoothing)
+                ce = ce * active.to(ce)
+                mode = self.categorical_reduction
+                if not self.time_scaled_loss and mode == "legacy_factorized":
+                    denominator = active.sum() if fn.weight is None else (
+                        target * fn.weight).sum(-1)[active].sum()
+                    losses[feat] = ce.sum() / denominator.clamp_min(1e-20)
+                else:
+                    losses[feat] = reduce_categorical_loss(ce, weight, active, mode)
+                continue
             losses[feat] = self.loss_fn_dict[feat](vf_output[feat], target)
 
             # Shared explicit reduction; legacy defaults retain the released loss.
@@ -445,10 +480,12 @@ class ModelGuidance(FlowMol):
         stochasticity=None, high_confidence_threshold=None, xt_traj=False, ep_traj=False,
         normalization_file_path:str=None, conditional_generation:bool=True,
         property_name:str=None, properties_for_sampling:int|float=None, 
-        training_mode:bool=True, guidance_scale = 1.5,  # Add guidance scale parameter
+        training_mode:bool=True, guidance_scale = 1.0,
         properties_handle_method:str='concatenate_sum', 
         multilple_values_to_one_property: List[float|int] | None = None, 
         dataset_name: str = None,
+        joint_decoding: dict | None = None,
+        joint_required_atoms=None,
         **kwargs):   
         """
         Sample molecules with Model-Guidance.
@@ -456,10 +493,23 @@ class ModelGuidance(FlowMol):
         Args:
             n_atoms: Tensor of shape (batch_size,) containing number of atoms per molecule
             n_timesteps: Number of timesteps for integration
-            guidance_scale: The guidance scale to use during sampling (default: 1.5)
+            guidance_scale: CFG convention, 0 unconditional / 1 conditional.
             
             (Other params same as FlowMol.sample)
         """
+        if isinstance(guidance_scale, dict):
+            raise ValueError("MG uses a single scalar guidance scale, not per-feature CFG weights")
+        if not math.isfinite(float(guidance_scale)) or not (
+            guidance_scale == 0 or self.min_scale <= guidance_scale <= self.max_scale
+        ):
+            raise ValueError("MG inference scale is outside its trained range")
+        if not self.use_scale_aware and guidance_scale != 1:
+            raise ValueError("A non-scale-aware checkpoint cannot change guidance scale")
+        if guidance_scale == 0 and properties_for_sampling is None and multilple_values_to_one_property is None:
+            # Placeholder is discarded by the scale-zero unconditional embedding.
+            properties_for_sampling = 0.
+        if conditional_generation:
+            normalization_file_path = self.resolve_normalization_file(normalization_file_path)
         if n_timesteps is None:
             n_timesteps = self.default_n_timesteps
         if properties_handle_method is None:
@@ -543,6 +593,13 @@ class ModelGuidance(FlowMol):
                 exclude_charges=self.exclude_charges,
                 atom_state_vocab=self.atom_state_vocab))
 
+        if joint_decoding is not None:
+            if not self.use_joint_atom_state or self.n_bond_types != 4:
+                raise ValueError("joint decoding requires joint-state/Kekule vocabulary")
+            from molguidance.analysis.joint_decode import attach_joint_decoding
+            for i, sample in enumerate(molecules):
+                attach_joint_decoding(sample, self.atom_state_vocab, joint_decoding,
+                                      None if joint_required_atoms is None else int(joint_required_atoms[i]))
         return molecules
 
     def sample_random_sizes(self, n_molecules: int, device="cuda:0",
@@ -559,7 +616,7 @@ class ModelGuidance(FlowMol):
         atom_count_nearest_k: int | None = None,
         atom_count_generator: torch.Generator | None = None,
         fake_atom_capacity_mode: str | None = None,
-        guide_w=1.5,    
+        guide_w=1.0,
         dataset_name: str = None,
         **kwargs):
         """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
@@ -592,6 +649,8 @@ class ModelGuidance(FlowMol):
             assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \
                 f"{len(atoms_per_molecule)} != {len(multilple_values_to_one_property)}"
 
+        if kwargs.get("joint_decoding") is not None:
+            kwargs["joint_required_atoms"] = real_atoms_per_molecule.tolist()
         return self.sample(atoms_per_molecule, 
             device=device,  
             stochasticity=stochasticity, 
@@ -741,12 +800,15 @@ class ScaleAwareMGVectorField(CTMCVectorField):
                     
                     if prop_emb is None:
                         raise ValueError("No property information available for conditional generation")
+                    if guidance_scale is not None:
+                        prop_emb = torch.where(
+                            scale_tensor[node_batch_idx] == 0, torch.zeros_like(prop_emb), prop_emb)
 
                     # Handle properties with different methods
                     if self.properties_handle_method == 'concatenate_sum':
                         intermediate_features = torch.cat([node_scalar_features, scale_emb, prop_emb], dim=-1)
                         intermediate_features = self.scalar_embedding_cond_updated(intermediate_features)
-                        node_scalar_features = node_scalar_features + intermediate_features
+                        node_scalar_features = node_scalar_features + self.condition_residual_scale * intermediate_features
                     elif self.properties_handle_method == 'concatenate':
                         intermediate_features = torch.cat([node_scalar_features, scale_emb, prop_emb], dim=-1)
                         node_scalar_features = self.scalar_embedding_cond_updated(intermediate_features)
@@ -880,6 +942,7 @@ class ScaleAwareMGVectorField(CTMCVectorField):
         self.training_mode = training_mode
         self.properties_handle_method = properties_handle_method
         self.multilple_values_to_one_property = multilple_values_to_one_property
+        self.dataset_name = dataset_name or self.dataset_name
 
         if cat_temp_func is None:
             cat_temp_func = self.cat_temp_func
@@ -1102,6 +1165,13 @@ class ScaleAwareMGVectorField(CTMCVectorField):
             p_s_1 = dst_dict[feat]
             temperature = cat_temp_func(t_i)
             p_s_1 = F.softmax(torch.log(p_s_1)/temperature, dim=-1) # log probabilities
+            if last_step:
+                saved = p_s_1.detach()
+                if feat == "e":
+                    saved = saved.new_zeros(g.num_edges(), saved.shape[-1])
+                    saved[upper_edge_mask] = p_s_1.detach()
+                    saved[~upper_edge_mask] = p_s_1.detach()
+                data_src[f"{feat}_endpoint_probs"] = saved
 
             if dfm_type == 'campbell':
 

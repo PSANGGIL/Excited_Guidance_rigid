@@ -13,7 +13,8 @@ from molguidance.models.loss_utils import reduce_categorical_loss
 
 def correction_options(config=None):
     options = dict(weight=0., probability=.25, time=.85, node_rate=.1,
-                   edge_rate=.02, coordinate_std=.1)
+                   edge_rate=.02, coordinate_std=.1, start_step=0.,
+                   warmup_steps=0., max_loss_ratio=0.)
     unknown = set(config or {}) - set(options)
     if unknown:
         raise ValueError(f"unknown correction options: {sorted(unknown)}")
@@ -27,6 +28,9 @@ def correction_options(config=None):
         raise ValueError("correction time must be strictly between zero and one")
     if options["weight"] > 0 and options["probability"] == 0:
         raise ValueError("enabled correction requires a nonzero probability")
+    for key in ("start_step", "warmup_steps"):
+        if int(options[key]) != options[key]:
+            raise ValueError(f"{key} must be an integer")
     return options
 
 
@@ -76,6 +80,8 @@ def correction_losses(model, g, generator=None, force=False):
     empty = {f"correction_{key}": zero for key in ("x", "s", "e")}
     if not model.training or opts["weight"] <= 0:
         return empty
+    if not force and getattr(model, "global_step", 0) < opts["start_step"]:
+        return empty
     if not force and float(torch.rand((), device=g.device, generator=generator)) >= opts["probability"]:
         return empty
     node_batch, edge_batch = get_batch_idxs(g)
@@ -97,9 +103,17 @@ def correction_losses(model, g, generator=None, force=False):
                     torch.zeros_like(embedding), embedding,
                 )
             model_time = torch.cat((time[:, None], embedding), -1)
+        kwargs = {}
+        if getattr(model, "use_scale_aware", False):
+            # Auxiliary restoration targets are ORIGINAL endpoints, not guided
+            # pseudo-targets. Train only anchors g=1 (conditional) / g=0 (drop).
+            dropped = getattr(g, "_USE_UNCONDITIONAL_EMBEDDING",
+                              torch.zeros(g.batch_size, 1, device=g.device, dtype=torch.bool))
+            kwargs["guidance_scale"] = (~dropped.reshape(-1)).to(time)
         output = model.predict_endpoint(
             g, model_time, node_batch, upper, graph_time=time,
             corruption_generator=generator, self_conditioning=True,
+            **kwargs,
         )
         result = {}
         real = g.ndata.get("is_real_1_true", torch.ones(g.num_nodes(), device=g.device, dtype=torch.bool))

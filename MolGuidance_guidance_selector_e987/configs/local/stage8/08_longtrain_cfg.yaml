@@ -1,0 +1,15 @@
+_base_: 05_small_model.yaml
+# Production candidate, not a declaration that the ablations improved quality.
+# Keep CFG for continuity; the MG path is independently integration-tested.
+training:
+  output_dir: ../runs/molguidance_stage8_longtrain_cfg
+  trainer_args:
+    max_epochs: 10000
+wandb:
+  name: hp1kg-est-stage8-longtrain-cfg
+  save_dir: ../runs/molguidance_stage8_longtrain_cfg
+vector_field:
+  condition_residual_scale: 0.5
+lr_scheduler:
+  base_lr: 0.00028
+  warmup_length: 5.0

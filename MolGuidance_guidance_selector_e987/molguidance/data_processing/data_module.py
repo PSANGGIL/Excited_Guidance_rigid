@@ -6,10 +6,11 @@ import dgl
 from molguidance.data_processing.dataset import collate
 from molguidance.data_processing.dataset import MoleculeDataset
 from molguidance.data_processing.samplers import SameSizeMoleculeSampler, SameSizeDistributedMoleculeSampler
+from molguidance.data_processing.edge_budget import EdgeBudgetBatchSampler
 
 class MoleculeDataModule(pl.LightningDataModule):
 
-    def __init__(self, dataset_config: dict, dm_prior_config: dict, batch_size: int, num_workers: int = 0, distributed: bool = False, max_num_edges: int = 40000):
+    def __init__(self, dataset_config: dict, dm_prior_config: dict, batch_size: int, num_workers: int = 0, distributed: bool = False, max_num_edges: int | None = None):
         super().__init__()
         self.distributed = distributed
         self.dataset_config = dataset_config
@@ -43,6 +44,8 @@ class MoleculeDataModule(pl.LightningDataModule):
         return MoleculeDataset(dataset_name, self.dataset_config, prior_config=self.prior_config)
 
     def train_dataloader(self):
+        if self.max_num_edges is not None:
+            return self._budget_loader(self.train_dataset, self.batch_size, True)
         dataloader = DataLoader(self.train_dataset, 
                                 batch_size=self.batch_size, 
                                 shuffle=True, 
@@ -52,6 +55,8 @@ class MoleculeDataModule(pl.LightningDataModule):
         return dataloader
     
     def val_dataloader(self):
+        if self.max_num_edges is not None:
+            return self._budget_loader(self.val_dataset, self.batch_size * 2, False)
         dataloader = DataLoader(self.val_dataset, 
                                 batch_size=self.batch_size*2, 
                                 shuffle=False, 
@@ -60,9 +65,20 @@ class MoleculeDataModule(pl.LightningDataModule):
         return dataloader
 
     def test_dataloader(self):
+        if self.max_num_edges is not None:
+            return self._budget_loader(self.test_dataset, self.batch_size * 2, False)
         dataloader = DataLoader(self.test_dataset,
                                 batch_size=self.batch_size*2, 
                                 shuffle=False, 
                                 collate_fn=collate, 
                                 num_workers=self.num_workers)
         return dataloader
+
+    def _budget_loader(self, dataset, batch_size, shuffle):
+        if self.distributed:
+            raise ValueError("edge-budget loader is single-device; refusing duplicated DDP data")
+        sampler = EdgeBudgetBatchSampler.from_dataset(
+            dataset, batch_size, self.max_num_edges, shuffle=shuffle,
+        )
+        return DataLoader(dataset, batch_sampler=sampler, collate_fn=collate,
+                          num_workers=self.num_workers)

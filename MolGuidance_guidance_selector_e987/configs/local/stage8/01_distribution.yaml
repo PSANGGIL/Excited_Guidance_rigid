@@ -1,0 +1,13 @@
+_base_: 00_control.yaml
+training:
+  output_dir: ../runs/molguidance_stage8_01_distribution
+wandb:
+  name: hp1kg-est-stage8-01-distribution
+  save_dir: ../runs/molguidance_stage8_01_distribution
+mol_fm:
+  chemistry_auxiliary:
+    valence_weight: 0.0
+    charge_weight: 0.0
+    distribution_valence_weight: 0.02
+    distribution_charge_weight: 0.01
+    distribution_min_time: 0.7

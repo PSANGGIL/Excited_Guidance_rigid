@@ -755,6 +755,11 @@ class FlowMol(pl.LightningModule):
             return reduce_time_scaled_loss_equivalent(unreduced, weight)
         return unreduced.mean()
 
+    def on_train_epoch_start(self):
+        sampler = getattr(self.trainer.train_dataloader, "batch_sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(self.current_epoch)
+
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
 
         # check if self has the attribute batches_per_epoch
@@ -921,11 +926,26 @@ class FlowMol(pl.LightningModule):
             if loss_key not in losses:
                 raise KeyError(f'enabled auxiliary loss {loss_key!r} is missing')
             total = total + weight * losses[loss_key]
+        if not any(f"correction_{feat}" in losses for feat in ("x", "s", "e")):
+            return total
+        auxiliary = total * 0.
         for feat in ("x", "s", "e"):
             key = f"correction_{feat}"
             if key in losses:
-                total = total + self.correction_config["weight"] * self.total_loss_weights[feat] * losses[key]
-        return total
+                auxiliary = auxiliary + self.correction_config["weight"] * self.total_loss_weights[feat] * losses[key]
+        step = getattr(self, "global_step", 0)
+        start, warmup = self.correction_config.get("start_step", 0), self.correction_config.get("warmup_steps", 0)
+        ramp = 0. if step < start else min(1., (step - start + 1) / max(warmup, 1.))
+        auxiliary = auxiliary * ramp
+        ratio = self.correction_config.get("max_loss_ratio", 0)
+        balance = total.new_ones(())
+        if ratio > 0:
+            # Detached adaptive LOSS magnitude cap. Not a gradient-norm bound
+            # and not an exact likelihood objective; logged/ablated separately.
+            balance = (ratio * total.detach().clamp_min(0) /
+                       auxiliary.detach().clamp_min(1e-20)).clamp(max=1.)
+        self.last_correction_balance = balance.detach()
+        return total + balance * auxiliary
 
     def compute_chemistry_auxiliary_losses(
         self,

@@ -287,6 +287,7 @@ def data_module_from_config(config: dict) -> MoleculeDataModule:
                                      dm_prior_config=config['mol_fm']['prior_config'],
                                      batch_size=batch_size, 
                                      num_workers=num_workers, 
-                                     distributed=distributed)
+                                     distributed=distributed,
+                                     max_num_edges=config['training'].get('max_num_edges'))
     
     return data_module
