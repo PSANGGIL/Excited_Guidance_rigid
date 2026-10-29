@@ -23,6 +23,13 @@ support/count 충돌과 미해결 항목을 정리했습니다. 우선 평가 �
 [최신 재분석 및 RDKit 2D](../analysis/hp1kg_e4690_result_reanalysis_20261029/)
 결과를 함께 보십시오.
 
+[3D 분자 생성의 화학적 유효성·방향족성 문헌 분석 리포트 (2026-10-29)](docs/MOLECULAR_GENERATION_CHEMICAL_VALIDITY_LITERATURE_REVIEW_20261029_KO.md)는
+분자 생성·조각 조립·제약 최적화 관련 17편을 원문 기준으로 검토하고,
+핵심 수식, 방향족성 처리 범위, 현재 Stage 8 코드와의 대응, 수치 support/count 문제,
+보정 점수의 학습 계약, 기하·다양성 평가 및 단계별 비교 실험을 정리합니다.
+출판본과 preprint, 논문 결과와 코드 관측·미검증 제안을 구별한 문헌/설계 문서이며,
+모델 수정이나 재학습 결과를 보고하는 문서는 아닙니다.
+
 ## Local HP1KG Stage 7 — fixed-data consistency experiment
 
 새 브랜치 `feature/molguidance-stage7-fixed-data-consistency`에서 HP1KG 1,581개와
