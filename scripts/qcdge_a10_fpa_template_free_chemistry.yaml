@@ -1,0 +1,62 @@
+seed: 61
+device: cuda:0
+data:
+  root: data_qcdge_a10_full
+diffusion:
+  timesteps: 500
+  beta_start: 0.0001
+  beta_end: 0.02
+  rotation_sigma_max: 3.0
+  so3_grid: 512
+  so3_terms: 128
+model:
+  hidden_dim: 256
+  num_layers: 8
+  time_dim: 64
+  condition_dim: 120
+  condition_dropout: 0.2
+  min_ring_size: 3
+  max_ring_size: 10
+training:
+  batch_size: 17000
+  num_workers: 0
+  epochs: 10000
+  learning_rate: 0.0001
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  bf16: true
+  chemistry:
+    bond_class_weights: [0.05, 1.0, 1.5, 2.0, 1.25]
+    bond_focal_gamma: 2.0
+    discrete_timestep_boost: 1.0
+    radical_projection_threshold: 0.8
+  validation_batches: 10
+  output_dir: runs/qcdge_a10_fpa_template_free_chemistry_v4
+  loss_weights:
+    atom_eps: 1.0
+    cell_eps: 1.0
+    radius_eps: 0.25
+    rotation: 0.5
+    atom_type: 1.0
+    charge: 0.25
+    hydrogen: 0.5
+    radical: 0.25
+    bond: 1.0
+    cell_size: 0.5
+    cell_aromatic: 0.25
+    relation: 1.0
+    membership: 1.0
+    atom_count: 0.5
+    cell_count: 0.5
+    cell_geometry: 0.5
+    cell_cardinality: 0.25
+    relation_overlap: 0.5
+    aromatic: 0.25
+    valence: 0.2
+    valence_completion: 0.2
+    charge_balance: 0.05
+    radical_count: 0.05
+    bond_length: 0.1
+    connectivity: 0.05
+    aromatic_degree: 0.1
+    radical_prior: 0.1

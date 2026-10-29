@@ -1,0 +1,332 @@
+# MolGuidance
+
+## Local HP1KG Stage 8 — joint decoding and verified training paths
+
+브랜치 `feature/molguidance-stage8-joint-decoding-mg-budget`:
+전역 atom/H/charge–Kekulé–connectivity 최종 solver, noise 생성 전 동일 분자
+Kekulé 표현 증강, MG soft target/EMA, 실제 edge-budget batching, correction
+안전장치 및 regularization 설정을 추가했습니다.
+전체 DB codec identity **1,581/1,581**, 회귀 테스트 **110개**,
+10개 설정의 실제 GPU optimizer/checkpoint/generation 연결 검사를 통과했습니다.
+이는 장기학습의 생성 품질 개선을 입증한 결과는 아닙니다.
+[Stage 8 수식·구현·검증·실행 기록](docs/STAGE8_JOINT_CONSISTENCY_20261020.md)을
+참고하십시오. 원본 DB와 이전 checkpoint/생성/XTB 결과는 변경하지 않았습니다.
+
+2026-10-29 현재 코드 스냅샷은 `c8af84d`이며 CPU 회귀 테스트 **130개**를
+통과했습니다. e4690 생성 당시 모델 소스 64개와 현재 소스의 해시가 일치합니다.
+[구조 실패·다양성·평가 한계 리포트](docs/STRUCTURE_FAILURE_REPORT_20261029.txt)에
+1,000개 생성의 원자가 실패, 고리 구성 편향, 좌표 경고, 최종 solver의
+support/count 충돌과 미해결 항목을 정리했습니다. 우선 평가 목표는 합리적인
+다양한 구조의 생성이며 XTB/sTDA는 조건 반영을 보는 보조 지표입니다.
+이전 보고서의 #830 O–O 결합 오기, nitro 형식전하 해석, 방향족 평면성
+평가 정정도 포함합니다. 이번 기록은 구조 문제가 해결됐다는 선언이 아닙니다.
+[최신 재분석 및 RDKit 2D](../analysis/hp1kg_e4690_result_reanalysis_20261029/)
+결과를 함께 보십시오.
+
+[3D 분자 생성의 화학적 유효성·방향족성 문헌 분석 리포트 (2026-10-29)](docs/MOLECULAR_GENERATION_CHEMICAL_VALIDITY_LITERATURE_REVIEW_20261029_KO.md)는
+분자 생성·조각 조립·제약 최적화 관련 17편을 원문 기준으로 검토하고,
+핵심 수식, 방향족성 처리 범위, 현재 Stage 8 코드와의 대응, 수치 support/count 문제,
+보정 점수의 학습 계약, 기하·다양성 평가 및 단계별 비교 실험을 정리합니다.
+출판본과 preprint, 논문 결과와 코드 관측·미검증 제안을 구별한 문헌/설계 문서이며,
+모델 수정이나 재학습 결과를 보고하는 문서는 아닙니다.
+
+## Local HP1KG Stage 7 — fixed-data consistency experiment
+
+새 브랜치 `feature/molguidance-stage7-fixed-data-consistency`에서 HP1KG 1,581개와
+공식 XYZ/EST/split을 변경하지 않고, 원자–결합 feedback, 분포 기반 호환성,
+별도 correction 학습, dropout 및 엄격한 생성 평가를 단계별 옵션으로 추가했습니다.
+변경 순서·수식·회귀 테스트·미해결 한계는
+[Stage 7 구현 및 검증 기록](docs/STAGE7_FIXED_DATA_CONSISTENCY.md)을 참고하십시오.
+장기학습/성능 개선을 완료했다는 의미는 아닙니다. 기존 checkpoint와 결과는 보존합니다.
+
+[![arXiv](https://img.shields.io/badge/arXiv-1234.56789-b31b1b.svg?style=flat)](https://arxiv.org/pdf/2512.12198)
+
+The paper at JCIM: [*"Molguidance: Advanced Guidance Strategies for Conditional Molecular Generation with Flow Matching"*](https://pubs.acs.org/doi/10.1021/acs.jcim.6c00964). 
+
+![Image](overview_fig.jpg)
+1. This molguidance framework is built on top of our previous work **[PropMolFlow](https://github.com/Liu-Group-UF/PropMolFlow)**.
+<!-- 2. You can also clone this repoistory from branch from our **[PropMolFlow](https://github.com/Liu-Group-UF/PropMolFlow)** repoistory without the need to create an new environment if you installed propmolflow before. -->
+2. What new here is that we implement different guidance methods and guidance format for conditonal flow matching framework. Moreover, we introudced a new dataset **[QMe14S](https://pubs.acs.org/doi/10.1021/acs.jpclett.5c00839)** beyond **QM9** to test the scalability of the our methods.
+
+
+## Environment Setup
+**Please Make Sure Cuda Version >= 12.8 and Already Installed Conda**
+
+Run the following commands in your terminal to set up `molguidance` (We have tested it on **Nvidia L4 and Blackwell B200** GPUs): 
+```python
+conda create -n molguidance python=3.12 
+conda activate molguidance
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+pip install torch-cluster torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.7.0%2Bcu128.html
+pip install pytorch-lightning==2.5.2
+pip install networkx==3.1
+pip install einops==0.8.1 rdkit==2025.3.5 py3Dmol==2.5.2 useful-rdkit-utils==0.90 scikit-learn==1.7.1 scikit-optimize==0.10.2 posebusters==0.5.0
+pip install torchtyping ase wandb jsonschema
+conda install conda-forge::openbabel
+conda install -c dglteam/label/th24_cu124 dgl=2.4.0.th24.cu124
+pip install -e .
+```
+Or you can simply install all packages by 
+```bash
+# make sure clone the repo first, and cd MolGuidance, so conda can run "pip install -e ." without error
+conda env create -f environment.yml
+```
+
+## Preprocessing for Dataset 
+### QM9
+#### Download
+We provide a corrected version of the QM9 SDF file originally from [DeepChem](https://github.com/deepchem/deepchem), fixing issues such as **invalid bond orders** and **non-zero net charges** in approximately **30,000 molecules**.
+
+To download the revised SDF file, run:
+```bash
+wget https://zenodo.org/records/15700961/files/all_fixed_gdb9.zip
+unzip all_fixed_gdb9.zip
+rm all_fixed_gdb9.zip
+```
+After downloading, move the **all_fixed_gdb9.sdf** file to the `data/qm9_raw/` directory:
+```bash
+mv all_fixed_gdb9.sdf data/qm9_raw/
+```
+The revised SDF file is the `rQM9_v0.sdf` sdf file and a later more complete fix leads to a new version of the sdf `rQM9_v1.sdf` with fewer unresolvable molecules, available at [zenodo version v3](https://zenodo.org/records/17726328) and also hosted at our HuggingFace [ColabFit rQM9](https://huggingface.co/datasets/colabfit/rQM9).
+
+#### Generate Training, Validation, Testing Data
+```bash
+python process_qm9_cond.py --config=configs/qm9/alpha/qm9_vanilla.yaml
+```
+
+### QMe14S
+#### Download
+We provide a cleaned SDF file of QMe14S where bonds information are first guessed by [Open Babel](https://github.com/openbabel/openbabel) then fixed for some unreasonable molecules' bond information. 
+
+To download the revised SDF file, run:
+```bash
+wget https://zenodo.org/records/16847162/files/cleaned_qme14s.sdf.zip
+unzip cleaned_qme14s.sdf.zip
+rm cleaned_qme14s.sdf.zip.zip
+```
+After downloading, move the **all_fixed_gdb9.sdf** file to the `data/qm9_raw/` directory:
+```bash
+mv cleaned_qme14s.sdf.zip data/qme14s_raw/
+```
+#### Generate Training, Validation, Testing Data
+```bash
+python process_qme14s_cond.py --config=configs/qme14s/mu/qme14s_vanilla.yaml
+```
+
+## Checkpoints
+All the trained model checkpoints can be found at our [Zenodo repository](https://zenodo.org/records/16847162). Can aslo get it by running:
+```bash
+wget https://zenodo.org/records/16847162/files/checkpoints.zip
+unzip checkpoints.zip
+rm checkpoints.zip
+```
+
+## Unified Guidance Sampler
+
+`sample_guided.py` provides one argparse entry point for every implemented
+sampling strategy. The original `sample_cfg.py`, `sample_cg.py`,
+`sample_mg.py`, `sample_ag.py`, and `sample_condition.py` commands remain
+available and are used internally, so their numerical sampling paths are not
+duplicated.
+
+```bash
+python sample_guided.py \
+  --guidance cfg \
+  --model-checkpoint checkpoints/model.ckpt \
+  --property-name s1 \
+  --properties-for-sampling 3.64 \
+  --normalization-file-path data/train_data_property_normalization.pt \
+  --guide-w-x 2 --guide-w-a 2 --guide-w-c 2 --guide-w-e 2 \
+  --n-mols 1000 --output-file sampling_result/cfg.sdf
+```
+
+Supported values and checkpoint requirements are:
+
+| `--guidance` | Method | Required checkpoints |
+|---|---|---|
+| `cfg` | Classifier-free guidance | `--model-checkpoint` trained with condition dropout |
+| `cg` | Classifier guidance | `--flowmol-checkpoint` and `--classifier-checkpoint` |
+| `mg` | Model guidance | `--model-checkpoint` trained as a ModelGuidance model |
+| `ag` | Autoguidance | `--good-model-checkpoint` and `--bad-model-checkpoint` |
+| `conditional` | Conditional sampling without extra guidance | `--model-checkpoint` |
+
+Use `--dry-run` to validate all files and print the delegated command without
+loading a model. CFG/AG expose per-feature weights, CG exposes classifier
+gradient scales through the same per-feature options, and MG uses the scalar
+`--guide-weight` option. Checkpoints are method-specific; a CFG checkpoint is
+not automatically a valid MG, CG, or AG checkpoint.
+
+## Vanilla Model
+### Training
+Train a PropMolFlow model without guidance. 
+#### QM9 (take property alpha as example)
+```python
+# training from scratch
+python train.py --config=configs/qm9/alpha/qm9_vanilla.yaml
+
+# continue training from checkpoints
+python train.py --resume=checkpoints/qm9/alpha/vanilla/epoch=1758-step=687612.ckpt
+```
+#### QMe14S (take property mu as example)
+```python
+# training from scratch
+python train.py --config=configs/qme14s/mu/qme14s_vanilla.yaml
+
+# continue training from checkpoints
+python train.py --resume=checkpoints/qme14s/mu/vanilla/epoch=1621-step=887232.ckpt
+```
+
+### Sampling
+#### QM9 (take property alpha as example) 
+```python
+python sample_condition.py --model_checkpoint "checkpoints/qm9/alpha/vanilla/epoch=1758-step=687612.ckpt" --n_mols 1000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --property_name "alpha" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --output_file "sampling_result/qm9/alpha/vallina.sdf" --analyze
+```
+#### QMe14S (take property mu as example)
+```python
+python sample_condition.py --model_checkpoint "checkpoints/qme14s/mu/vanilla/epoch=1621-step=887232.ckpt" --n_mols 1000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --output_file "sampling_result/qme14s/mu/vallina.sdf" --analyze
+```
+
+## Classifer-Free Guidance 
+### Training
+#### QM9 (take property alpha as example)
+```python
+# training from scratch
+python train_with_guidance.py --config=configs/qm9/alpha/qm9_cfg.yaml
+
+# continue training from checkpoints
+python train_with_guidance.py --resume=checkpoints/qm9/alpha/classifier_free_guidance/epoch=1900-step=742978.ckpt
+```
+#### QMe14S (take property mu as example)
+```python
+# training from scratch
+python train_with_guidance.py --config=configs/qme14s/mu/qme14s_cfg.yaml
+
+# continue training from checkpoints
+python train_with_guidance.py --resume=checkpoints/qme14s/mu/classifier_free_guidance/epoch=1598-step=874215.ckpt
+```
+
+### Sampling with Different Guidance Format
+#### guidance on probability with linear format
+```python
+# QM9 with guidance weight = 1.5 for alpha
+python sample_cfg.py --model_checkpoint "checkpoints/qm9/alpha/classifier_free_guidance/epoch=1900-step=742978.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "linear" --where_to_apply_guide "probabilities" --output_file "sampling_result/qm9/probability_linear/cfg.sdf" --analyze
+
+# QMe14S with guidance weight = 1.5
+python sample_cfg.py --model_checkpoint "checkpoints/qme14s/mu/classifier_free_guidance/epoch=1598-step=874215.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "linear" --where_to_apply_guide "probabilities" --output_file "sampling_result/qme14sprobability_linear/probability_linear/cfg.sdf" --analyze
+```
+
+#### guidance on probability with log format
+```python
+# QM9 with guidance weight = 1.5 for alpha
+python sample_cfg.py --model_checkpoint "checkpoints/qm9/alpha/classifier_free_guidance/epoch=1900-step=742978.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "probabilities" --output_file "sampling_result/qm9/probability_log/cfg.sdf" --analyze
+
+# QMe14S with guidance weight = 1.5
+python sample_cfg.py --model_checkpoint "checkpoints/qme14s/mu/classifier_free_guidance/epoch=1598-step=874215.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "probabilities" --output_file "sampling_result/qme14s/probability_log/cfg.sdf" --analyze
+```
+#### guidance on rate matrix with linear format
+```python
+# QM9 with guidance weight = 1.5 for alpha
+python sample_cfg.py --model_checkpoint "checkpoints/qm9/alpha/classifier_free_guidance/epoch=1900-step=742978.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "linear" --where_to_apply_guide "rate_matrix" --output_file "sampling_result/qm9/rate_matrix_linear/cfg.sdf" --analyze
+
+# QMe14S with guidance weight = 1.5
+python sample_cfg.py --model_checkpoint "checkpoints/qme14s/mu/classifier_free_guidance/epoch=1598-step=874215.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "linear" --where_to_apply_guide "rate_matrix" --output_file "$sampling_result/qme14s/rate_matrix_linear/cfg.sdf" --analyze
+```
+#### guidance on rate matrix with log format
+```python
+# QM9 with guidance weight = 1.5 for alpha
+python sample_cfg.py --model_checkpoint "checkpoints/qm9/alpha/classifier_free_guidance/epoch=1900-step=742978.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "rate_matrix" --output_file "$sampling_result/qm9/rate_matrix_log/cfg.sdf" --analyze
+
+# QMe14S with guidance weight = 1.5
+python sample_cfg.py --model_checkpoint "checkpoints/qme14s/mu/classifier_free_guidance/epoch=1598-step=874215.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "rate_matrix" --output_file "$sampling_result/qme14s/rate_matrix_log/cfg.sdf" --analyze
+```
+
+## Autoguidance
+We use vanilla model as good model, and then train a inferior model to guide the vanilla model towards the direction with good property alignment. Here we only show the example autoguidance on probability with log format.   
+### Training
+#### QM9 (take property alpha as example)
+```python
+# training the inferor model from scratch
+python train.py --config=configs/qm9/alpha/qm9_inferior.yaml
+```
+#### QMe14S (take property mu as example)
+```python
+# training the inferor model from scratch
+python train.py --config=configs/qme14s/mu/qme14s_inferior.yaml
+```
+### Sampling
+#### QM9 (take property alpha as example) 
+```python
+python sample_ag.py --good_model_checkpoint "checkpoints/qm9/alpha/vanilla/epoch=1758-step=687612.ckpt" --bad_model_checkpoint "checkpoints/qm9/alpha/auto_guidance/model-step=step=40000.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "probabilities" --output_file "sampling_result/qm9/probability_log/ag.sdf" --analyze
+```
+#### QMe14S (take property mu as example)
+```python
+python sample_ag.py --good_model_checkpoint "checkpoints/qme14s/mu/vanilla/epoch=1621-step=887232.ckpt" --bad_model_checkpoint "checkpoints/qme14s/mu/auto_guidance/model-step=step=40000.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "concatenate_sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_w_x 1.5 --guide_w_a 1.5 --guide_w_c 1.5 --guide_w_c 1.5 --dfm_type "campbell_rate_matrix" --guidance_format "log" --where_to_apply_guide "probabilities" --output_file "sampling_result/qme14s/probability_log/ag.sdf" --analyze
+```
+
+## Model Guidance 
+### Training
+#### QM9 (take property alpha as example)
+```python
+# training from scratch
+python train_with_guidance.py --config=configs/qm9/alpha/qm9_mg.yaml
+
+# continue training from checkpoints
+python train_with_guidance.py --resume=checkpoints/qm9/alpha/model_guidance/epoch=1651-step=645775.ckpt
+```
+#### QMe14S (take property mu as example)
+```python
+# training from scratch
+python train_with_guidance.py --config=configs/qme14s/mu/qme14s_mg.yaml
+
+# continue training from checkpoints
+python train_with_guidance.py --resume=checkpoints/qme14s/mu/model_guidance/epoch=1990-step=1088639.ckpt
+```
+### Sampling
+#### QM9 (take property alpha as example) 
+```python
+python sample_mg.py --model_checkpoint "checkpoints/qm9/alpha/model_guidance/epoch=1651-step=645775.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "sum" --multilple_values_file "sampling_input/qm9/in_distribution_sampling/train_half_sampled_values_alpha.npy" --number_of_atoms "sampling_input/qm9/in_distribution_sampling/train_half_sampled_no_atoms_alpha.npy" --property_name "alpha" --normalization_file_path "data/qm9/train_data_property_normalization.pt" --guide_wight 1.5 --output_file "sampling_result/qm9/probability_log/mg.sdf" --analyze
+```
+#### QMe14S (take property mu as example)
+```python
+python sample_mg.py --model_checkpoint "checkpoints/qme14s/mu/model_guidance/epoch=1990-step=1088639.ckpt" --n_mols 10000 --max_batch_size 128 --n_timesteps 100 --properties_handle_method "sum" --multilple_values_file "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_values_mu.npy" --number_of_atoms "sampling_input/qme14s/in_distribution_sampling/train_half_sampled_no_atoms_mu.npy" --normalization_file_path "data/qme14s/train_data_property_normalization.pt" --guide_wight 1.5 --output_file "sampling_result/qme14s/probability_log/mg.sdf" --analyze
+```
+
+## Bonous: Classifier Guidance 
+We didn't include classifier guidance in our main paper due to the poor performance compared with CFG and the extra training cost of the classifier. However, we still provide the code for training the classifier here for reader's interest.
+
+ - The training code for classifier is on `modelguidance/classifier`
+ - The sampling code with classifier guidance is on `sample_cg.py`
+
+## Bayesian Optimization with Molguidance
+We provide how we use Molguidance for Bayesian Optimization in the `bayesian` folder. Please refer to the `README.md` file in that folder for more details.
+
+## Molecular Stability Evaluation
+
+We provide a chemically rigorous molecular stability evaluation script that addresses known issues in widely-used stability metrics (see [Nikitin et al., *Digital Discovery*, 2025](https://pubs.rsc.org/en/content/articlehtml/2025/dd/d5dd00206k) for a detailed discussion of these issues).
+
+Specifically, earlier implementations (e.g., from MiDi and FlowMol) contained a bug in valency computation for aromatic bonds, which led to chemically implausible entries in the valency lookup table (e.g., neutral carbon with valency 3, neutral nitrogen with valency 2) and artificially inflated molecular stability scores. Our implementation addresses this by:
+- Using RDKit's explicit valence with charge-valence consistency checking (`valence - default_valence - formal_charge = 0`) for **QM9** (5 elements: C, H, O, N, F)
+- Adopting the corrected valency lookup table from Nikitin et al. for **QMe14S** (14 elements), which correctly handles multi-valent elements such as S (valency 2, 3, or 6), P (valency 3 or 5).
+
+
+### Usage
+
+```python
+from molguidance.utils.compute_molecule_stability import compute_stability
+
+compute_stability(sdf_file)
+# print out the following stability metrics:
+# - 'rdkit_validity': fraction of molecules passing RDKit sanitization
+# - 'molecule_stability': fraction of molecules where all atoms have valid valencies
+# - 'atom_stability': fraction of atoms with valid valencies
+```
+
+## Acknowledgements
+
+Molguidance builds upon the source code from the following projects:
+* [FlowMol](https://github.com/Dunni3/FlowMol)
+* [Mattergen](https://github.com/microsoft/mattergen)
+* [EDM2](https://github.com/NVlabs/edm2)
+* [Diffusion-wo-CFG](https://github.com/tzco/Diffusion-wo-CFG)
+* [Discrete_Guidance](https://github.com/hnisonoff/discrete_guidance)
+* [geom-drugs-3dgen-evaluation](https://github.com/isayevlab/geom-drugs-3dgen-evaluation)

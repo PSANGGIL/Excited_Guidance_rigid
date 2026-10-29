@@ -1,0 +1,120 @@
+Stage 6 현재 모델 학습 성능 및 생성 이력 저장
+저장일: 2026-10-20 UTC
+브랜치: feature/molguidance-joint-chemistry-self-correction
+기존 코드 커밋: f8610ed8cddca762525b86ffd1b7ab77eab57879
+
+1. 모델과 DB
+연속 heavy-atom Cartesian flow + masked categorical CTMC. 단일 EST 조건.
+원소/형식전하/붙은 H 수 joint state 37개 + fake state 1개. H는 별도 좌표 노드가 아님.
+Kekule NONE/SINGLE/DOUBLE/TRIPLE, self-conditioning, 독립 graph/coordinate time, bond-first geometry.
+HP1KG 공식 최적화 XYZ 기반 1581개: train1264, val158, test159. EST 정규화는 train 기준 평균0.5285704, std0.5375195.
+DB: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz
+batch640, FP32, Adam lr0.0014, warmup50 epoch, weight_decay1e-12, grad value clip1.0.
+Condition dropout0.1, self-conditioning rate0.5, graph_clean_probability0.5, fake_atom_fraction0.3.
+좌표/노드/결합 loss weight3/1/2; auxiliary edge/valence/charge/connectivity/aromatic=0.5/0.05/0.05/0.25/0.2.
+
+2. 학습 완료와 저장된 체크포인트
+학습 경로: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/hp1kg-est-cfg-stage6-b640-expandable_a73c71od
+epoch0~1999, 총2000 epoch / optimizer4000 step. max_epochs 도달로 정상 종료; early stop 아님.
+로그 구간: 2026-10-19T02:04:11.370579+00:00 ~ 2026-10-19T06:57:38.955717+00:00
+최저 validation: e1944, 0.119524367154
+주의: last.ckpt 실제 내용은 e1983, step3968. 마지막 로그 epoch와 다름.
+원본 정확도 W&B 8000 history record에서 train4000 step, val2000 epoch를 추출함. 진행바 반올림 값이 아님.
+training_epochs.csv의 train은 두 step loss 산술평균. val은 고정 time grid라 절대값을 train과 직접 일반화 격차로 해석하지 않음.
+epoch	train_step_mean	val_total	condition_shuffle_gain
+0	15.346108913	13.498555183	-0.008697510
+9	3.445436120	3.137601376	-0.000575542
+49	2.687138319	2.284434080	0.011128902
+99	1.263816833	1.074133992	0.019549131
+499	0.527780920	0.310031801	0.005965889
+709	0.513585627	0.223700032	0.009436369
+999	0.467845529	0.171546534	0.007661700
+1074	0.428691179	0.161960557	0.014674455
+1499	0.394777715	0.129432470	0.012038350
+1713	0.374744773	0.120871797	0.016323864
+1866	0.299148455	0.119908355	0.011214077
+1944	0.336322188	0.119524367	0.015668869
+1983	0.365617454	0.119606256	0.021274477
+1999	0.349462822	0.129069224	0.012727083
+
+3. 생성 실행 이력
+각 완료 실행1000개. e624는 완료 결과가 없는 준비 폴더이며 성공 생성으로 세지 않음.
+완료된 본 생성은 7개 실행/총7000회 요청이며, 실행 간 분자 중복을 제거한 총개수가 아니다. 별도 진단 생성1184회와 partial reverse648회는 아래7절에 기록했다.
+초기 e1074 CFG2와 paired e1074 CFG2는 다른 실행/크기 벡터이므로 혼동하지 않음.
+이 절의 absEST<=0.1은 경계 허용오차1e-6 eV를 적용해 원본 CSV에서 재집계했다.
+label	RDKit_valid	novel_unique_connected	XTB_success	absEST<=0.1	aromatic_EST<0
+e624_prepared	None	None	0	0	0
+e709_cfg2	588	450	250	32	5
+e1074_cfg2_initial	653	543	213	46	5
+e1074_cfg0_paired	737	660	383	45	10
+e1074_cfg1_paired	713	631	305	59	10
+e1074_cfg2_paired	695	615	248	64	6
+e1713_cfg1	878	848	569	91	13
+e1944_cfg1	776	728	509	132	5
+
+4. 동일 입력 체크포인트 비교 (기존 비교표 수치 보존)
+EST=0, CFG1, seed20261019, 100 time grid points(99 update), 각1000개.
+원자 수 벡터5~44/평균24.485는 앞선 생성 결과에서 유래했음. 현재 train DB p(n|EST=0)의 fresh sample이 아님.
+checkpoint	val_exact	valid	novel_connected	XTB_ok	EST_MAE	absEST<=0.1	aromatic_hits	clean_supported_aromatic_hits	ringless_hits
+e1074	0.16196055710315704	713	631	305	0.48574098360655743	58	30	16	5
+e1713	0.12087179720401764	878	848	569	0.48801581722319864	91	57	33	16
+e1944	0.11952436715364456	776	728	509	0.44627897838899805	132	56	29	51
+경계값 정정: 기존 e1074 CFG1 표는 absEST<=0.1을58개로 집계했지만, generation_index825의 1.428-1.528=-0.100 eV를 포함하면59개다. 이 분자는 방향족이라 해당 aromatic hit도30->31이다. clean-supported aromatic16은 그대로다. 기존 표와 원본 비교 JSON은 덮어쓰지 않았고, inclusive 재집계는3절과 generation_inventory.csv에 보존했다.
+e1713는 유효율/novel/clean-supported aromatic 후보 수가 우세. e1944는 val loss/전체 EST hit/고리분포 proxy가 우세.
+e1713->e1944 전체 nearzero hit91->132지만 aromatic57->56, ringless16->51. 방향족 조건 제어 향상으로 해석하지 않음.
+계산 성공률100%는 준비 필터 통과 후 계산한 분모 기준. 전체1000개 성공률이 아님.
+Topology-clean proxy: net charge0, radical0, 3/4 ring없음, >=9 ring없음. Ringless와7/8 ring은 허용하므로 물리적/합성 가능성 보장은 아님.
+XTB는 diffusion heavy coordinates+RDKit H 좌표에서 시작. ETKDG 재생성 없음. e1944 최적화 heavy RMSD 중앙0.78391A, >1A 144/509.
+
+5. e1074 CFG 비교
+CFG0=denoiser 조건미사용, CFG1=기본조건부, CFG2=강화. count벡터는 동일하며 CFG0도 원자수까지 무조건부로 새로 샘플링한 실험은 아니다. 동일 seed, 각1000개.
+이 표의 기존 CFG1 58개도 위4절과 같은 경계 처리로 inclusive59개가 된다.
+cfg	valid	novel_connected	XTB_ok	EST_MAE	absEST<=0.1	clean_supported_hits
+cfg0	737	660	383	0.5179268929503916	45	24
+cfg1	713	631	305	0.48574098360655743	58	28
+cfg2	695	615	248	0.4633266129032258	64	17
+가이던스에 따른 EST 이동은 관찰되지만, 강한 CFG의 구조 악화 및 계산 생존 선택편향을 함께 고려해야 함.
+
+6. 방향족 포함 음수 EST 후보와 XYZ
+e1944 음수 EST5개는 모두 방향족 포함. 아래5개는 train/val/test 전체1581개에서 동일 구조0건.
+generation_index	xtb_job	S1_eV	T1_eV	EST_eV	xyz_file
+366	generated_000267	2.587	2.603	-0.016	generation_000366_xtbopt.xyz
+504	generated_000367	2.702	2.704	-0.002	generation_000504_xtbopt.xyz
+528	generated_000388	0.591	2.177	-1.586	generation_000528_xtbopt.xyz
+683	generated_000500	2.739	2.74	-0.001	generation_000683_xtbopt.xyz
+838	generated_000610	0.26	0.848	-0.588	generation_000838_xtbopt.xyz
+XYZ 폴더: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz
+수소 포함 XTB 최적화 좌표를 원자 순서 그대로 변환; 원본 SDF 대비 좌표차0. XYZ에는 결합 정보가 없음.
+DB 비교는 비입체 canonical SMILES, H/전하 유지, tautomer/protonation 별도통합 없음. 외부 DB 신규성은 검사하지 않음.
+음수는 저장된 sTDA 계산값이며 실제 inverted excited state 인증은 아님. -0.001/-0.002eV처럼 경계에 가까운 사례 포함.
+
+7. 완료된 추가 진단 및 핵심 제한
+전체 DB codec identity1581/1581. Denoiser15525조건/93150판정, partial reverse648, 생성 screening416+replication768.
+e1944 invalid224는 모두 AtomValenceException. H 제약만 푸는 진단으로53개(방향족48개) sanitize되나 생산 성공 수에 합산하지 않음.
+원자 수가 큰 고리 포함 분자에서 오류 누적과 결합/원자/H 불일치가 보임. 방향족 자체 때문이라고 원자 수 효과와 분리해 확정하지는 못함.
+t=.5 test 방향족141: true조건 valid101/141, identity38/141; null조건105/141,43/141. 단일 실험 차이로 조건이 해롭다고 확정하지 않음.
+100->250 point 재검증: valid205->208/256, aromatic164->168. 중성 방향족112->136 신호는 있으나 다중검정 후 확정적이지 않음.
+DB |EST|<=0.1: 231개 중 방향족195(84.4%); 과거227은 경계 부동소수점 처리 차이. DB XTB 저gap 통과115 중86 방향족.
+생성 XTB 저gap132 중56 방향족(42.4%). 계산/선별만으로 편향 전체가 설명되지 않음.
+과거 DB XTB는 ETKDG/MMFF 출발, 현재 생성 XTB는 diffusion 출발. 계산 수준 보정값으로 혼동하지 않음.
+상세 진단: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/aromatic_bias_diagnostics_20261019/consolidated_20261020/REPORT_KO.txt
+
+8. 다음 수정안은 아직 미적용
+EST 조건 유지. 평균 원자가 loss의 허점을 분포 기반 호환성 loss로 시험하고 기존 self-conditioning에 원자/H<->결합 교차 피드백을 검토.
+호환성 DP는 국소/factorized 근사이며 전역 Kekule cycle 보장이 아님. 노이즈 낮은 구간의 약한 항부터 별도 ablation 필요.
+조건 경로 변경은 동일 noise/heldout 반복에서 구조 악화가 재현될 때만 검토. EST를 무시해서 validity가 오르는 것은 성공이 아님.
+추가 학습만으로 aromatic lowgap 성능이 개선된다는 증거 없음. e1713/e1944를 목적별 기준으로 함께 보존.
+이 저장 작업은 모델/DB/ckpt를 수정하거나 학습/생성/새XTB를 시작하지 않음. 사용자 요청에 따라 문서·기록 추출 스크립트·요약 산출물만 Git 기록에 포함하며, DB/ckpt/대용량 생성 원본은 경로와 해시로 참조함.
+정합성 미해결 항목: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/docs/STAGE6_LOGIC_MATH_AUDIT_20261019.md
+
+9. 파일
+training_steps.csv: 4000 optimizer-step loss
+training_epochs.csv / validation_epochs.csv: 2000 epoch와 구성항
+training_summary.json: 실제 config, best 및 last 체크포인트 구분
+training_loss_history.png: 전체 loss 곡선
+generation_inventory.csv/json: 8개 실행 폴더 및 실제 산출물
+checkpoint_comparison.csv/json, cfg_comparison.csv/json: 통제 비교
+negative_est_novelty_check.json:5개 DB 비교와 XYZ provenance
+diagnostic_results.json / diagnostic_replications.csv / atom_count_provenance.json: 추가 검증
+source_manifest.json: 원본 파일 경로/해시. 기존 결과는 보존함.
+이 보고서는 자동 집계 후 사람이 읽을 기록으로 검토·보완했다. 특히 e1074 경계값59개와 보존된 이전 표58개의 차이를 위에 명시했다. 원본 결과와 자동 집계 수치는 변경하지 않았다.

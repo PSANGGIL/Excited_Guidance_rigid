@@ -1,0 +1,21 @@
+seed: 61
+data:
+  root: ../data_qcdge_a10_full
+  aromatic_only: true
+  condition: [s1_energy, t1_energy]
+representation:
+  min_ring_size: 3
+  max_ring_size: 16
+  unknown_ring_token: true
+model:
+  hidden: 256
+  max_rings: 12
+  max_ring_size: 16
+  max_substituent_atoms: 32
+  atom_vocabulary: [C, N, O, F]
+  condition_rbf_kernels: 16
+training:
+  stages: [topology, scaffold_chemistry, substituent, coordinate_refinement]
+  teacher_forcing_schedule: [1.0, 0.2]
+  topology_never_erased: true
+  kekule_bond_target: true

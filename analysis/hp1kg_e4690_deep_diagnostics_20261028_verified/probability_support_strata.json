@@ -1,0 +1,42 @@
+{
+  "real_atoms": {
+    "n": 36413,
+    "singleton": 31044,
+    "near_one": 35836,
+    "multi_options_above_1e_6": 578,
+    "singleton_fraction": 0.8525526597643699,
+    "near_one_fraction": 0.9841540109301623
+  },
+  "fake_atoms": {
+    "n": 2780,
+    "singleton": 2723,
+    "near_one": 2774,
+    "multi_options_above_1e_6": 6,
+    "singleton_fraction": 0.9794964028776978,
+    "near_one_fraction": 0.9978417266187051
+  },
+  "real_real_bonds": {
+    "n": 42688,
+    "singleton": 41059,
+    "near_one": 42587,
+    "multi_options_above_1e_6": 101,
+    "singleton_fraction": 0.9618393928035982,
+    "near_one_fraction": 0.9976339955022488
+  },
+  "real_real_no_bond": {
+    "n": 692452,
+    "singleton": 692211,
+    "near_one": 692438,
+    "multi_options_above_1e_6": 14,
+    "singleton_fraction": 0.9996519614355941,
+    "near_one_fraction": 0.9999797819921092
+  },
+  "any_fake_pair": {
+    "n": 112877,
+    "singleton": 112762,
+    "near_one": 112863,
+    "multi_options_above_1e_6": 14,
+    "singleton_fraction": 0.9989811919168653,
+    "near_one_fraction": 0.9998759711898793
+  }
+}

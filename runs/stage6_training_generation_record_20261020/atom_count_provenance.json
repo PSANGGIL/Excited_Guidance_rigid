@@ -1,0 +1,16 @@
+{
+  "fixed_count_n": 1000,
+  "fixed_count_mean": 24.485,
+  "fixed_count_min": 5,
+  "fixed_count_max": 44,
+  "matches_previous_generated_heavy_counts_exactly": true,
+  "previous_generation": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/samples.sdf",
+  "fresh_conditional_mean": 28.39825439453125,
+  "fresh_conditional_min": 7,
+  "fresh_conditional_max": 69,
+  "effective_reference_n": 127.84550476074219,
+  "fixed_counts_absent_from_train": [
+    5
+  ],
+  "interpretation": "Original checkpoint comparisons share the same input vector and are controlled relative comparisons. Their requested sizes do not represent fresh p(n|EST=0) from the current DB. A fixed --number_of_atoms overrides the nominal conditional-kernel option."
+}

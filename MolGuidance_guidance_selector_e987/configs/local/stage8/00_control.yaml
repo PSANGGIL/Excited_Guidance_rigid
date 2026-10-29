@@ -1,0 +1,20 @@
+_base_: ../stage7/02_feedback.yaml
+# Keep the stage7 reference untouched. All stage8 arms use the real edge budget.
+training:
+  output_dir: ../runs/molguidance_stage8_00_control
+  max_num_edges: 40000
+  batch_size: 128
+  num_workers: 0
+  trainer_args:
+    precision: 32-true
+  evaluation:
+    generation:
+      joint_decoding:
+        time_limit: 2.0
+        max_rounds: 8
+mol_fm:
+  correction:
+    weight: 0.0
+wandb:
+  name: hp1kg-est-stage8-00-control
+  save_dir: ../runs/molguidance_stage8_00_control

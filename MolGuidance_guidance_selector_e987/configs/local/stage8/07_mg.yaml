@@ -1,0 +1,16 @@
+_base_: 06_condition_scale.yaml
+training:
+  output_dir: ../runs/molguidance_stage8_07_mg
+wandb:
+  name: hp1kg-est-stage8-07-mg
+  save_dir: ../runs/molguidance_stage8_07_mg
+guidance:
+  enabled: true
+  guidance_type: model_guidance
+  p_uncond: 0.2
+  min_scale: 0.0
+  max_scale: 2.0
+  mg_high: 0.75
+  data_ratio: 0.5
+  mg_start_step: 200
+  use_scale_aware: true

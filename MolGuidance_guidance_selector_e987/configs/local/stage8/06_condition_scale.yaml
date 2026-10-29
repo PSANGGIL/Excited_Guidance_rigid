@@ -1,0 +1,8 @@
+_base_: 02_correction.yaml
+training:
+  output_dir: ../runs/molguidance_stage8_06_condition_scale
+wandb:
+  name: hp1kg-est-stage8-06-condition-scale
+  save_dir: ../runs/molguidance_stage8_06_condition_scale
+vector_field:
+  condition_residual_scale: 0.5

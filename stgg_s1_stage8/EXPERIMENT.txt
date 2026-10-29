@@ -1,0 +1,57 @@
+STGG S1=4.0 eV comparison experiment (2026-10-21 UTC)
+
+Scope
+  Preserve the existing HP1KG / EST Stage8 training process and its files.
+  Train another instance of the CURRENT Stage8 CFG diffusion/flow model.
+  STGG here means its Conjugated-xTB dataset, not replacing the network with
+  the autoregressive STGG+AL architecture and not running an active-learning loop.
+  A new vocabulary is derived from the new data. No HP1KG checkpoint is loaded.
+
+Data
+  Raw: ../STGG-AL/data/dataset_train.csv (2.9M rows).
+  Reuse existing first-100k conformers/splits from ../STGG-AL/data/data_kekule.
+  This experiment does NOT claim to train on the entire 2.9M collection.
+  S1 [eV] = 1239.84193 / wavelength [nm]. The upstream sTDA parser reads the
+  first singlet transition. The old log10(f_osc + 1e-6) label is NOT reused.
+  There is no T1 or EST label in this dataset.
+  Heavy coordinates retain the source all-atom indices and float32 values.
+  Explicit H nodes become exact attached-H counts in joint chemical states.
+  Kekule bonds and formal charges are retained. Each accepted molecule must
+  reconstruct the original RDKit canonical non-isomeric identity.
+  Source files are never overwritten. Rejections are recorded; more than 5%
+  rejected aborts the run. Multifragment/radical cases are not silently encoded.
+  Train frequencies are retained; any train/val/test canonical cross-split
+  overlap is removed from later held-out splits and recorded separately.
+  Geometry source: existing RDKit ETKDG/force-field conformers, NOT official
+  quantum-optimized HP1KG coordinates. This is an important confound.
+
+Training
+  Architecture/losses match current Stage8; data-dependent vocabulary changes.
+  FP32, TF32 disabled, CFG condition dropout 0.1, model dropout 0.05.
+  LR 2.8e-4; warmup 215 optimizer steps (same step scale as old 5*43 schedule).
+  Directed complete-edge budget 40000 including fake-node capacity, max batch128.
+  GPU allocation limit 20% for this new process; existing training limit stays70%.
+  New data/model source/config/checkpoint hashes are stored in the run directory.
+  Codec + finite loss/gradient + actual optimizer-step probes gate fresh training.
+  Max epochs10000 is an upper bound, not evidence that all epochs are beneficial.
+
+Scheduled generation
+  After at least10000 optimizer steps and a completed validation epoch,
+  copy the best validation checkpoint and generate1000 molecules at S1=4.0eV.
+  CFG=1,100 time points, batch4, GPU allocation limit8%.
+  Train-only P(atom_count|S1) uses a Gaussian kernel with bandwidth0.15eV.
+  Training continues. Generator is a separate session with stdin/devnull.
+  Save all1000 raw endpoints and count failures in the denominator.
+  RDKit2D PNGs depict connected unique molecules absent from the used100k-derived
+  corpus. Full2.9M membership is NOT yet checked and must not be claimed novel.
+  No hard graph projection, ETKDG reembedding, MMFF/UFF repair or XTB is run.
+  This first scheduled panel is interim, not a declaration of convergence.
+
+Evaluation interpretation
+  Compare raw validity, connectedness, radicals/charge, aromatic inclusion,
+  ring-size distribution and unchanged-coordinate geometry diagnostics with
+  the STGG train set overall and its S1=3.9-4.1eV subset.
+  Targeting4.0eV does NOT establish that generated molecules have S1=4.0eV;
+  actual property fidelity requires independent excited-state calculations.
+  Different dataset, sizes, elements, property/calculation level and geometry
+  mean this is not an isolated causal aromaticity-only experiment.

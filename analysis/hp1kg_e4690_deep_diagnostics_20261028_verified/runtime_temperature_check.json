@@ -1,0 +1,24 @@
+{
+  "frozen_model_temperature": {
+    "vector_field": {
+      "temperature_schedule": 0.05,
+      "temperature_at_98_over_99": 0.05
+    }
+  },
+  "float32_vs_float64_example": {
+    "torch.float32": [
+      1.0,
+      0.0
+    ],
+    "torch.float64": [
+      1.0,
+      1.0202115488976845e-60
+    ]
+  },
+  "input_example_probabilities": [
+    0.999,
+    0.001
+  ],
+  "temperature": 0.05,
+  "checkpoint_epoch_zero_based": 4690
+}

@@ -1,0 +1,277 @@
+{
+  "created_utc": "2026-10-20T04:05:09.653264+00:00",
+  "branch": "feature/molguidance-joint-chemistry-self-correction",
+  "model_code_commit": "f8610ed8cddca762525b86ffd1b7ab77eab57879",
+  "sources": [
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987/wandb/offline-run-20261019_020337-a73c71od/run-a73c71od.wandb",
+      "size": 16665858,
+      "sha256": "f7d0b6c0fe48eeb29b18d9d14a384e00c220a4ed720aecc52287f4fc54439d89"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/diagnostics/save_stage6_history_20261020.py",
+      "size": 24375,
+      "sha256": "d19c1e2b11bbe3cdf1acc03e206cf6ab8cadb532f4e4dab98bb3eaa28b036d37"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz/test_data_smiles.pkl",
+      "size": 8393,
+      "sha256": "3ea44a5a2238ea382a5ed6a42edab7a3cee2af951bdbdd6ec9192cb1e34b1557"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz/train_data_smiles.pkl",
+      "size": 64383,
+      "sha256": "67d6ee2d100a2da95523ee5c3cb508f343b2b486089c2f68f756261a62c1d118"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz/val_data_smiles.pkl",
+      "size": 8260,
+      "sha256": "0be749cec23f8ae751670e6a5046e438116bec8c899413412aec98e5b467e024"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/aromatic_bias_diagnostics_20261019/consolidated_20261020/atom_count_provenance.json",
+      "size": 821,
+      "sha256": "9842b1aa45b10cb51d929465adeffb971df55a1d56cbb84e9258df8223247f4d"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/aromatic_bias_diagnostics_20261019/consolidated_20261020/conclusions.json",
+      "size": 5376,
+      "sha256": "3579335bdd178794a3a08f30c86cb6da2db776c5aaca4c6ec78f6da7f110ccb2"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/aromatic_bias_diagnostics_20261019/consolidated_20261020/replication_summary.csv",
+      "size": 2580,
+      "sha256": "09ee79e479d0aeabaf45fcd4e71a77eac75956f32468e36d66b063630c4d7c3f"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg0/analysis/summary.json",
+      "size": 3697,
+      "sha256": "b4c78a6651d66cd0f1d470adde54ad6985452550b3edb9b77f4a873ea134e9b8"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg0/status/supervisor.status",
+      "size": 526,
+      "sha256": "cd22c094e099ca30f8c893ee59801de43456e999df910f4f9609e36bae8cecf1"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg0/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 58577,
+      "sha256": "9d569e4b210e0572ba3a64c0bae550fd0bf09742944866e98f93b9d647f239e1"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg0/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "1d6b762a7e7871b2235726052b0a684b480353e9b913fed9a3be514b29cf9689"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg1/analysis/summary.json",
+      "size": 3524,
+      "sha256": "a620ecf935ec1fa6c6764c3bf6b56b74ce6e6944520b8a18cfc0ed4f49ff4653"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg1/status/supervisor.status",
+      "size": 526,
+      "sha256": "7816f240816903421b28beb6b42e1c9bc872ef209c35b73ed7f2f71bc3f9137b"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg1/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 46858,
+      "sha256": "5f161abc899a01871355dfd1dd274764495a95823c768a5ab8425dbbd1a8c9e4"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg1/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "314ac327baeca5992ea5a9854a1e1ecab827fe8a486a48b79a9b81e36ded795c"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg2/analysis/summary.json",
+      "size": 3523,
+      "sha256": "98c3b8595d6a192a87242655c04810ef705e7b574e82ea268f97a80c2372b247"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg2/status/supervisor.status",
+      "size": 526,
+      "sha256": "7369c1ed61dfcfd31046d19d3bf600bb04bf39ad649e470c851352e414eeffe5"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg2/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 37359,
+      "sha256": "45a61751b9a841efc6767a11bbabd365a284b5e3fcca86216ef5a0d52706438b"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/cfg2/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "6deee17cd1391a8499f43433e99765eb5772f653faed556829cbf6a75bfbeeee"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/cfg_paired_e1074_est0_n1000_seed20261019/comparison.json",
+      "size": 6683,
+      "sha256": "41cba40d457952b8492c9f78b4a08141471cd58065f5dc96f7d2892112d3b8e5"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/checkpoint_comparison_e1074_e1713_e1944_est0_cfg1_seed20261019/checkpoint_metrics.csv",
+      "size": 3205,
+      "sha256": "c9032be4d668afd63cf6e12b04b0da50fc54be905a96a3a6e9752c1810d13e6a"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/checkpoint_comparison_e1074_e1713_e1944_est0_cfg1_seed20261019/comparison.json",
+      "size": 9437,
+      "sha256": "5c3e1128bc23c959e32696006d86836a0a9935f41b7fe58e702ea64569093de3"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/analysis/summary.json",
+      "size": 3386,
+      "sha256": "7139af4292601feb6b5a7b288f1957de481f24b252d94844e8bc0748aeb4985b"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/run_full_pipeline.sh",
+      "size": 5877,
+      "sha256": "1719b1b8c3e57d9680a8c4651d327e90a763d3b63b5ade06e1f891136b8e1321"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/status/supervisor.status",
+      "size": 687,
+      "sha256": "eb51d430db422402f39b2b56adc20a3678c8ffb0477bc3a9c6e194afead32afa"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 33152,
+      "sha256": "4728a7943035bed30e1c432e5f6282d5829886887801b8c93496366489b107be"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1074_est0_n1000_cfg2_seed20261019/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 136,
+      "sha256": "9b57a004c4d5cc238c7743bd5dab1eb13d096a41103f536ef657bfd872a05648"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/analysis/summary.json",
+      "size": 4372,
+      "sha256": "e41acfba6ef99896c9a847e6142b2c14ff883a7c24fe1369d9663cdebdeb9f2e"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/fixed_atom_counts.npy",
+      "size": 8128,
+      "sha256": "443b02c8909154d8c807a6f07eb3c21ca84d24e8fcea2b1a353b8fdf0ef5825e"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/run_generation.sh",
+      "size": 3517,
+      "sha256": "82db9f41757063b006296875555fa8121d95487c79dd843e26c6ef632bb4a38d"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/status/supervisor.status",
+      "size": 367,
+      "sha256": "d07f5280e49cc7cdf4237e417e87f2f260b0d6f5fed2c6ad1b2264269eb821e2"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 97901,
+      "sha256": "fab64d2ac68408e5cbd656b2998bd8826c08cd2b4548c5bc1d6a6998793810d2"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1713_est0_n1000_cfg1_seed20261019/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "ebbf62b868695404567fb29e9f3a29c007ea5c0585a269def3e4df130393fa17"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/analysis/summary.json",
+      "size": 4028,
+      "sha256": "fb17cf526a4563808dc292cadbbe0c2b7484e5f4b3eb02393c528e10e2deea7e"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/generation_000366_xtbopt.xyz",
+      "size": 2606,
+      "sha256": "bc8cdaa3fecccd18f125c29744e0dc84939066819328f8ce08d04aa34e304518"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/generation_000504_xtbopt.xyz",
+      "size": 2502,
+      "sha256": "4704f19ad26a89e19446da2a2cae20bce51aa80f945a5b13defac2807e117781"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/generation_000528_xtbopt.xyz",
+      "size": 2866,
+      "sha256": "e674e56d63677366f1970a77694af2064725bca85a0b73c675f72278f545be6b"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/generation_000683_xtbopt.xyz",
+      "size": 2190,
+      "sha256": "23a99e16e9625bcd6371a21c687ea4edd3cec0ce9bc99eb4bc1b6328c61e6807"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/generation_000838_xtbopt.xyz",
+      "size": 2970,
+      "sha256": "9b61a0ce398eb99ac322517333a373beb066ba989bf0dd75c67d9cca5d079bb2"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/aromatic_negative_est_xyz/manifest.json",
+      "size": 5423,
+      "sha256": "276852ee2f5573590eac9dd7ef57381a56b3944041932baabf41ae321565774a"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/fixed_atom_counts.npy",
+      "size": 8128,
+      "sha256": "443b02c8909154d8c807a6f07eb3c21ca84d24e8fcea2b1a353b8fdf0ef5825e"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/run_generation.sh",
+      "size": 3517,
+      "sha256": "83587992b1f9a8fde54a0ae564295f01dc03ace2bcdd60087606a5361ee3b588"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/status/supervisor.status",
+      "size": 367,
+      "sha256": "b0cda3e892c6ba64ecb1852a5726e411f844a9bbdd3c23927884c5fc96f48383"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 87976,
+      "sha256": "27c62a5b0463188fed4474087c3204376b3f71c40b997015b72f954776a0e1ee"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_e1944_est0_n1000_cfg1_seed20261019/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "f6525fdb73ec6b656cdb19dfdf6c027d2643c85fbc28ae2d086ccad50ceefe88"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_est0_n1000_cfg2_seed20261019/analysis/summary.json",
+      "size": 3024,
+      "sha256": "90cb9cd67e758699e44bc26c91c62323ed3a46c2d219a2ea57fbc1aec451620e"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_est0_n1000_cfg2_seed20261019/run_generation.sh",
+      "size": 2440,
+      "sha256": "b161d613cb3b86ec6e3fcf70af3f9aa75380c31a36afc6e385d9a29a65ac657b"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_est0_n1000_cfg2_seed20261019/status/supervisor.status",
+      "size": 316,
+      "sha256": "a5b336d43f16cc7b36e2d48d99818873c5f6a255794d293b6338e6b55ea629f0"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_est0_n1000_cfg2_seed20261019/xtb_stda_diffusion_coords_24x1/work/results.csv",
+      "size": 37864,
+      "sha256": "90293ff5ed4e6c8cc00d877c303fb19e559371a53562f374512dea459cc7dc55"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/generation_stage6_best_est0_n1000_cfg2_seed20261019/xtb_stda_diffusion_coords_24x1/work/summary.json",
+      "size": 108,
+      "sha256": "a10185f944a3a5a38b67db94e286a6e1cdb3ebe2ea9f5f855fafcc7c7800c78d"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/hp1kg-est-cfg-stage6-b640-expandable_a73c71od/checkpoints/last.ckpt",
+      "size": 96061326,
+      "sha256": "ce481e2ec79d58f7038ffb01557ab0eca429a86a31aab3ebd375182357b4f560"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/hp1kg-est-cfg-stage6-b640-expandable_a73c71od/config.yaml",
+      "size": 3592,
+      "sha256": "d390cbd3fe4650a1fe67c7b42e94effcfd14f994f0ff1d8c83be98b342da6159"
+    },
+    {
+      "path": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first/launcher_b640_expandable_20261019.log",
+      "size": 2602650,
+      "sha256": "bdadb809b6adcf5ce9f129781d2836de7b49789b6193121dc46c791e69612d77"
+    }
+  ]
+}

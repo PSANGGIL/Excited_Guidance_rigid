@@ -1,0 +1,1089 @@
+from typing import Dict, List, Union, Callable, Optional, Sequence
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
+import pytorch_lightning as pl
+import dgl
+import torch.nn.functional as F
+from molguidance.models.flowmol import FlowMol
+from molguidance.data_processing.utils import get_batch_idxs, get_upper_edge_mask, build_edge_idxs, get_edge_batch_idxs
+from molguidance.analysis.molecule_builder import SampledMolecule
+from molguidance.models.ctmc_vector_field import CTMCVectorField
+from molguidance.models.mask_ctmc import frozen_mask_transition
+
+
+CATEGORICAL_PROBABILITY_MODES = ("corrected", "legacy")
+
+
+def guided_rate_endpoint(p_u, p_c, weight, temperature, form, location, support=None):
+    """Return endpoint probabilities and the mask exit-rate multiplier.
+
+    Probability guidance normalizes BEFORE rate construction. Rate guidance
+    combines nonnegative rates, so its total exit rate may also change.
+    """
+    if location not in {"probabilities", "rate_matrix"}:
+        raise ValueError("where_to_apply_guide must be probabilities or rate_matrix")
+    if (not torch.isfinite(torch.as_tensor(weight))
+            or not torch.isfinite(torch.as_tensor(temperature)) or temperature <= 0):
+        raise ValueError("guidance weight and positive temperature must be finite")
+    if support is not None:
+        support = support.to(device=p_u.device, dtype=torch.bool)
+        if support.shape != (p_u.shape[-1],) or not support.any():
+            raise ValueError("class support must select at least one real class")
+    if location == "probabilities":
+        values = combine_guided_endpoint_probabilities(
+            p_u, p_c, weight, temperature=temperature, guidance_format=form)
+    else:
+        # Temperature is already applied to p_u/p_c in the caller.
+        if form == "linear":
+            values = ((1 - weight) * p_u + weight * p_c).clamp_min(0)
+        elif form == "log":
+            tiny = torch.finfo(p_u.dtype).tiny
+            values = ((1 - weight) * p_u.clamp_min(tiny).log()
+                      + weight * p_c.clamp_min(tiny).log()).exp()
+            values = values.masked_fill((p_u == 0) & (p_c == 0), 0)
+        else:
+            raise ValueError("guidance_format must be linear or log")
+    if support is not None:
+        values = values.masked_fill(~support, 0)
+    total = values.sum(-1, keepdim=True)
+    if not torch.isfinite(values).all() or (total <= 0).any():
+        raise ValueError("guided rate distribution has non-finite or zero total mass")
+    return values / total, total if location == "rate_matrix" else torch.ones_like(total)
+
+
+def _project_to_probability_simplex(values: torch.Tensor) -> torch.Tensor:
+    """Project vectors onto the probability simplex along the last axis.
+
+    Linear CFG with a scale larger than one is an extrapolation and can produce
+    negative entries. The Euclidean simplex projection is deterministic and is
+    the closest valid probability vector to that extrapolation.
+    """
+    sorted_values, _ = torch.sort(values, dim=-1, descending=True)
+    cssv = sorted_values.cumsum(dim=-1) - 1.0
+    ranks = torch.arange(
+        1, values.shape[-1] + 1, device=values.device, dtype=values.dtype
+    )
+    support = sorted_values - cssv / ranks > 0
+    rho = support.sum(dim=-1, keepdim=True).clamp_min(1) - 1
+    theta = cssv.gather(-1, rho) / (rho.to(values.dtype) + 1.0)
+    projected = (values - theta).clamp_min(0.0)
+    return projected / projected.sum(dim=-1, keepdim=True).clamp_min(
+        torch.finfo(values.dtype).tiny
+    )
+
+
+def combine_guided_endpoint_probabilities(
+    p_unconditional: torch.Tensor,
+    p_conditional: torch.Tensor,
+    guide_weight: float,
+    temperature: float | torch.Tensor = 1.0,
+    guidance_format: str = "log",
+    probability_mode: str = "corrected",
+    eps: float = 1e-9,
+) -> torch.Tensor:
+    """Combine endpoint distributions and apply temperature exactly once.
+
+    The corrected log-CFG expression is
+
+        softmax(((1-w) log p_u + w log p_c) / T).
+
+    The released rate-matrix probability branch instead evaluated
+    softmax(p_guided / T). That behavior remains available only through the
+    explicit legacy mode so old sampling results can be reproduced.
+    """
+    if probability_mode not in CATEGORICAL_PROBABILITY_MODES:
+        raise ValueError(
+            f"Unknown categorical probability mode {probability_mode!r}; "
+            f"choose one of {CATEGORICAL_PROBABILITY_MODES}."
+        )
+    if guidance_format not in {"linear", "log"}:
+        raise ValueError(
+            f"Invalid guidance_format {guidance_format!r}; choose 'linear' or 'log'."
+        )
+    if p_unconditional.shape != p_conditional.shape:
+        raise ValueError(
+            "Conditional and unconditional probability tensors must have the same shape."
+        )
+    if not torch.isfinite(p_unconditional).all() or not torch.isfinite(p_conditional).all():
+        raise ValueError("Categorical endpoint probabilities contain NaN or infinity.")
+
+    temperature_tensor = torch.as_tensor(
+        temperature, device=p_unconditional.device, dtype=p_unconditional.dtype
+    )
+    if temperature_tensor.numel() != 1 or not torch.isfinite(temperature_tensor):
+        raise ValueError("Categorical temperature must be one finite scalar.")
+    if float(temperature_tensor) <= 0.0:
+        raise ValueError("Categorical temperature must be greater than zero.")
+
+    p_u = p_unconditional.clamp_min(0.0)
+    p_c = p_conditional.clamp_min(0.0)
+    p_u = p_u / p_u.sum(dim=-1, keepdim=True).clamp_min(eps)
+    p_c = p_c / p_c.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+    if guidance_format == "log":
+        guided_log_probability = (
+            (1.0 - guide_weight) * torch.log(p_u.clamp_min(eps))
+            + guide_weight * torch.log(p_c.clamp_min(eps))
+        )
+        if probability_mode == "legacy":
+            guided_probability = torch.exp(guided_log_probability)
+            return F.softmax(guided_probability / temperature_tensor, dim=-1)
+        return F.softmax(guided_log_probability / temperature_tensor, dim=-1)
+
+    guided_probability = (1.0 - guide_weight) * p_u + guide_weight * p_c
+    if probability_mode == "legacy":
+        return F.softmax(guided_probability / temperature_tensor, dim=-1)
+
+    guided_probability = _project_to_probability_simplex(guided_probability)
+    return F.softmax(
+        torch.log(guided_probability.clamp_min(eps)) / temperature_tensor,
+        dim=-1,
+    )
+
+class ZerosEmbedding(nn.Module):
+    """
+    Module that returns a tensor of zeros with the specified hidden dimension.
+    Used for unconditional generation in classifier-free guidance.
+    """
+    def __init__(self, hidden_dim: int=256):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+    
+    def forward(self, x: torch.Tensor|int, device='cuda') -> torch.Tensor:
+        if isinstance(x, int):
+            return torch.zeros(x, self.hidden_dim, device=device)
+        return torch.zeros(x.size(0), self.hidden_dim, device=x.device)
+
+class SetEmbeddingType:
+    """
+    Controls whether to use conditional or unconditional embeddings for each
+    batch element during training.
+    
+    Similar to mattergen's SetEmbeddingType, this class creates a mask where
+    True indicates using the unconditional embedding and False indicates using
+    the conditional embedding.
+    """
+    def __init__(self, p_unconditional: float = 0.2):
+        """
+        Args:
+            p_unconditional: Probability of using unconditional embedding during training
+        """
+        self.p_unconditional = p_unconditional
+    
+    def __call__(
+        self,
+        g: dgl.DGLGraph,
+        enabled: bool = True,
+        generator: torch.Generator | None = None,
+    ) -> dgl.DGLGraph:
+        """
+        Creates and sets the unconditional embedding mask for the graph.
+        
+        Args:
+            g: DGL graph with property information
+            
+        Returns:
+            DGL graph with _USE_UNCONDITIONAL_EMBEDDING attribute
+        """
+        # Only proceed if the graph has property information
+        if not hasattr(g, 'prop') or g.prop is None:
+            return g
+        
+        batch_size = g.batch_size
+        device = g.device
+        
+        if enabled:
+            mask = torch.rand(
+                batch_size, 1, device=device, generator=generator
+            ) <= self.p_unconditional
+        else:
+            mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
+        
+        # Add the mask to the graph
+        g._USE_UNCONDITIONAL_EMBEDDING = mask
+        
+        return g       
+
+class ClassifierFreeGuidance(FlowMol):
+    """
+    Extended FlowMol model with Classifier-Free Guidance capabilities.
+    
+    During training, each batch element randomly uses either conditional
+    or unconditional embeddings based on a probability mask.
+    
+    During sampling, combines conditional and unconditional predictions
+    with a guidance scale to control the influence of the conditioning.
+    """
+    
+    def __init__(self, *args, 
+                 p_uncond: float = 0.2,  # Probability of training with unconditional embedding
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Create SetEmbeddingType controller
+        self.embedding_controller = SetEmbeddingType(p_unconditional=p_uncond)
+
+        vector_field_config = dict(kwargs.get("vector_field_config", {}))
+        if vector_field_config.get("chemistry_feedback", False):
+            vector_field_config["chemistry_state_metadata"] = self.atom_state_vocab
+        vector_field_config['independent_modality_time'] = (
+            self.independent_modality_time
+        )
+
+        # Create unconditional embedder (zero embedding)
+        self.unconditional_embedder = ZerosEmbedding(hidden_dim=self.property_embedding_dim)
+        self.vector_field = CFGVectorField(n_atom_types=self.n_atom_types,
+                                            canonical_feat_order=self.canonical_feat_order,
+                                            interpolant_scheduler=self.interpolant_scheduler, 
+                                            n_atom_states=self.n_atom_states,
+                                            category_support_masks=self.category_support_masks,
+                                            n_charges=self.n_atom_charges, 
+                                            n_bond_types=self.n_bond_types,
+                                            n_hydrogen_counts=self.n_hydrogen_counts,
+                                            exclude_charges=self.exclude_charges,
+                                            property_embedding_dim=self.property_embedding_dim,
+                                            property_embedder=self.property_embedder,
+                                            properties_handle_method=self.properties_handle_method,
+                                            conditional_generation=self.conditional_generation,
+                                            dataset_name=self.dataset_name,
+                                            **vector_field_config)
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        t: torch.Tensor | None = None,
+        graph_time: torch.Tensor | None = None,
+        corruption_generator: torch.Generator | None = None,
+        condition_dropout: bool | None = None,
+        self_conditioning: bool | None = None,
+    ):
+        """
+        Modified forward pass that handles both conditional and unconditional embeddings.
+        
+        For each sample in the batch, we compute both conditional and unconditional
+        embeddings, then select between them based on a mask.
+        """        
+    
+        batch_size = g.batch_size
+        device = g.device
+        
+        # Check if the attribute loss_fn_dict exists
+        if not hasattr(self, 'loss_fn_dict'):
+            self.configure_loss_fns(device=g.device)    
+
+        # Get batch indices of every atom and edge
+        node_batch_idx, edge_batch_idx = get_batch_idxs(g)
+
+        # Create a mask which selects all of the upper triangle edges from the batched graph
+        upper_edge_mask = get_upper_edge_mask(g)
+
+        t, graph_time = self.resolve_modality_times(
+            batch_size=batch_size,
+            device=device,
+            coordinate_time=t,
+            graph_time=graph_time,
+            generator=corruption_generator,
+        )
+
+        if condition_dropout is None:
+            condition_dropout = self.training
+        g = self.embedding_controller(
+            g, enabled=condition_dropout, generator=corruption_generator
+        )
+
+        # Make sure prop has correct shape
+        g.prop = g.prop.unsqueeze(-1) if g.prop.dim() == 1 else g.prop
+        g.prop = g.prop.to(device)
+
+        # Move property embedder to the appropriate device
+        self.property_embedder = self.property_embedder.to(device)
+        self.unconditional_embedder = self.unconditional_embedder.to(device)
+
+        # Get both conditional and unconditional embeddings
+        cond_emb = self.property_embedder(g.prop)
+        uncond_emb = self.unconditional_embedder(g.prop)
+
+        # Use mask to select between conditional and unconditional embeddings
+        # _USE_UNCONDITIONAL_EMBEDDING: True = use unconditional, False = use conditional
+        use_uncond = g._USE_UNCONDITIONAL_EMBEDDING.to(device) 
+        prop_emb = torch.where(use_uncond, uncond_emb, cond_emb)
+
+        # Combine with time
+        t_combined = torch.cat([t.unsqueeze(-1), prop_emb], dim=-1)
+        t_combined = t_combined.to(device)
+
+        # construct interpolated molecules
+        g = self.vector_field.sample_conditional_path(
+            g,
+            t,
+            node_batch_idx,
+            edge_batch_idx,
+            upper_edge_mask,
+            generator=corruption_generator,
+            graph_time=graph_time,
+        )
+
+        # forward pass for the vector field
+        vf_output = self.predict_endpoint(
+            g,
+            t_combined,
+            node_batch_idx,
+            upper_edge_mask,
+            corruption_generator=corruption_generator,
+            self_conditioning=self_conditioning,
+            graph_time=graph_time,
+        )
+
+        # get the target (label) for each feature
+        targets = {}
+        alpha_t_prime = self.modality_schedule_values(
+            'alpha_t_prime', t, graph_time
+        )
+
+        assert self.parameterization == "ctmc", "ClassifierFreeGuidance only supports CTMC parameterization"
+
+        for feat_idx, feat in enumerate(self.canonical_feat_order):
+            if feat == 'e':
+                data_src = g.edata
+            else:
+                data_src = g.ndata
+
+            target = data_src[f'{feat}_1_true']
+            if feat == "e":
+                target = target[upper_edge_mask]
+            if feat in self.n_cat_dict:
+                if self.target_blur == 0.0:
+                    target = target.argmax(dim=-1)
+                else:
+                    target = target + torch.randn(
+                        target.shape,
+                        device=target.device,
+                        dtype=target.dtype,
+                        generator=corruption_generator,
+                    ) * self.target_blur
+                    target = F.softmax(target, dim=-1)
+
+            # for CTMC parameterization, we do not apply loss on already unmasked features
+            if feat in self.n_cat_dict:
+                if feat == 'e':
+                    xt_idxs = data_src[f'{feat}_t'][upper_edge_mask].argmax(-1)
+                else:
+                    xt_idxs = data_src[f'{feat}_t'].argmax(-1)
+                # note that we use the default ignore_index of the CrossEntropyLoss class here
+                target[ xt_idxs != self.n_cat_dict[feat] ] = -100 # set the target to ignore_index when the feature is already unmasked in xt
+
+                support = self.vector_field.get_category_support_mask(feat)
+                if support is not None and target.ndim == 1:
+                    unsupported_target = ~support[target.clamp_min(0)]
+                    # Keep validation on the train-supported vocabulary.
+                    target[unsupported_target & (target != -100)] = -100
+
+
+            targets[feat] = target
+
+        # get the time-dependent loss weights if necessary
+        if self.time_scaled_loss:
+            time_weights = self.modality_schedule_values(
+                'loss_weights', t, graph_time
+            )
+            
+        # compute losses
+        losses = {}
+        for feat_idx, feat in enumerate(self.canonical_feat_order):
+
+            if self.time_scaled_loss:
+                weight = time_weights[:, feat_idx]
+                if feat == 'e':
+                    weight = weight[edge_batch_idx][upper_edge_mask]
+                else:
+                    weight = weight[node_batch_idx]
+                weight = weight.unsqueeze(-1)
+            else:
+                weight = 1.0
+
+            # compute the losses
+            target = targets[feat]
+            losses[feat] = self.loss_fn_dict[feat](vf_output[feat], target)
+
+            # Keep row-wise coordinate weighting and the configured categorical
+            # estimator (legacy defaults remain broadcast-equivalent).
+            losses[feat] = self.reduce_feature_loss(
+                feat, losses[feat], target, weight
+            )
+
+        losses.update(
+            self.compute_chemistry_auxiliary_losses(
+                g, vf_output, upper_edge_mask, graph_time
+            )
+        )
+        return losses        
+
+    @torch.no_grad()
+    def sample(self, n_atoms: torch.Tensor, n_timesteps: int = None, device="cuda:0",
+        stochasticity=None, high_confidence_threshold=None, xt_traj=False, ep_traj=False,
+        normalization_file_path:str=None, conditional_generation:bool=True,
+        property_name:str=None, properties_for_sampling:int|float=None, 
+        training_mode:bool=True,   
+        properties_handle_method:str='concatenate_sum', 
+        multilple_values_to_one_property: List[float|int] | None = None, 
+        guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0},
+        dfm_type='campbell',
+        guidance_format: str = "log",  # 'linear' or 'log'
+        where_to_apply_guide: str = "probabilities",  # 'probabilities' or 'rate_matrix',
+        categorical_temperature: float | None = None,
+        categorical_probability_mode: str = "corrected",
+        collect_categorical_trace: bool = False,
+        residual_mask_policy: str = "reject",
+        dataset_name: str = "qm9",
+        joint_decoding: dict | None = None,
+        joint_required_atoms=None,
+         **kwargs):   
+        """
+        Sample molecules with classifier-free guidance.
+        """
+        if conditional_generation:
+            normalization_file_path = self.resolve_normalization_file(normalization_file_path)
+        if n_timesteps is None:
+            n_timesteps = self.default_n_timesteps
+        if properties_handle_method is None:
+            properties_handle_method = self.properties_handle_method
+
+        if xt_traj or ep_traj:
+            visualize = True
+        else:
+            visualize = False    
+
+        # Create a batched graph
+        edge_idxs_dict = {}
+        for n_atoms_i in torch.unique(n_atoms):
+            edge_idxs_dict[int(n_atoms_i)] = build_edge_idxs(n_atoms_i)
+
+        g = []
+        for n_atoms_i in n_atoms:
+            edge_idxs = edge_idxs_dict[int(n_atoms_i)]
+            g_i = dgl.graph((edge_idxs[0], edge_idxs[1]), num_nodes=n_atoms_i, device=device)
+            g.append(g_i)
+
+        g = dgl.batch(g)
+        upper_edge_mask = get_upper_edge_mask(g)
+        node_batch_idx, edge_batch_idx = get_batch_idxs(g)            
+
+        # Sample molecules from prior
+        g = self.sample_prior(g, node_batch_idx, upper_edge_mask)   
+
+        # Setup integration arguments
+        integrate_kwargs = {
+            'upper_edge_mask': upper_edge_mask,
+            'n_timesteps': n_timesteps,
+            'visualize': visualize,
+            'guide_w': guide_w,
+            'normalization_file_path': normalization_file_path,
+            'conditional_generation': conditional_generation,
+            'property_name': property_name,
+            'properties_for_sampling': properties_for_sampling,
+            'training_mode': training_mode,
+            'properties_handle_method': properties_handle_method,
+            'multilple_values_to_one_property': multilple_values_to_one_property,
+            'dataset_name': dataset_name
+        }
+        
+        if self.parameterization == 'ctmc':
+            integrate_kwargs['stochasticity'] = stochasticity
+            integrate_kwargs['high_confidence_threshold'] = high_confidence_threshold
+            integrate_kwargs['dfm_type'] = dfm_type
+            integrate_kwargs['guidance_format'] = guidance_format
+            integrate_kwargs['where_to_apply_guide'] = where_to_apply_guide
+            integrate_kwargs['categorical_temperature'] = categorical_temperature
+            integrate_kwargs['categorical_probability_mode'] = categorical_probability_mode
+            integrate_kwargs['collect_categorical_trace'] = collect_categorical_trace
+
+        # Integrate with guidance
+        itg_result = self.vector_field.integrate_with_CFG_guidance(g, node_batch_idx, **integrate_kwargs, **kwargs)
+
+        if visualize:
+            g, traj_frames = itg_result
+        else:
+            g = itg_result
+
+        g.edata['ue_mask'] = upper_edge_mask
+        g = g.to('cpu')
+
+        if self.parameterization == 'ctmc':
+            ctmc_mol = True
+        else:
+            ctmc_mol = False
+
+        # Build molecule objects
+        molecules = []
+        for mol_idx, g_i in enumerate(dgl.unbatch(g)):
+            args = [g_i, self.atom_type_map]
+            if visualize:
+                args.append(traj_frames[mol_idx])
+
+            molecules.append(SampledMolecule(*args,
+                ctmc_mol=ctmc_mol,
+                build_xt_traj=xt_traj,
+                build_ep_traj=ep_traj,
+                atom_state_vocab=self.atom_state_vocab,
+                residual_mask_policy=residual_mask_policy,
+                exclude_charges=self.exclude_charges))
+
+        if joint_decoding is not None:
+            if not self.use_joint_atom_state or self.n_bond_types != 4:
+                raise ValueError("joint decoding requires joint-state/Kekule vocabulary")
+            from molguidance.analysis.joint_decode import attach_joint_decoding
+            for i, sample in enumerate(molecules):
+                attach_joint_decoding(sample, self.atom_state_vocab, joint_decoding,
+                                      None if joint_required_atoms is None else int(joint_required_atoms[i]))
+        return molecules    
+
+    def sample_random_sizes(self, n_molecules: int, device="cuda:0",
+        stochasticity=None, high_confidence_threshold=None, 
+        xt_traj=False, ep_traj=False,
+        normalization_file_path:str=None, conditional_generation:bool=True,
+        property_name:str=None, properties_for_sampling:int|float=None, 
+        training_mode:bool=True,   
+        properties_handle_method:str=None, 
+        multilple_values_to_one_property: List[float|int] | None = None,  
+        number_of_atoms: List[int]|None = None, 
+        atom_count_mode: str | None = None,
+        atom_count_bandwidth: float | Sequence[float] | None = None,
+        atom_count_nearest_k: int | None = None,
+        atom_count_generator: torch.Generator | None = None,
+        fake_atom_capacity_mode: str | None = None,
+        guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0}, 
+        dfm_type='campbell_rate_matrix',  
+        guidance_format: str = "log", 
+        where_to_apply_guide: str = "probabilities",
+        categorical_temperature: float | None = None,
+        categorical_probability_mode: str = "corrected",
+        collect_categorical_trace: bool = False,
+        residual_mask_policy: str = "reject",
+        dataset_name: str = "qm9",
+        n_timesteps: int | None = None,
+        **kwargs):
+        """Sample n_moceules with the number of atoms sampled from the distribution of the training set."""
+
+        if multilple_values_to_one_property is not None and properties_for_sampling is not None:
+            raise ValueError('You can not provide both multilple_values_to_one_property and properties_for_sampling, only one of them should be provided')
+
+        real_atoms_per_molecule = self.resolve_atom_counts(
+            n_molecules,
+            device,
+            number_of_atoms=number_of_atoms,
+            properties_for_sampling=properties_for_sampling,
+            multiple_properties=multilple_values_to_one_property,
+            atom_count_mode=atom_count_mode,
+            atom_count_bandwidth=atom_count_bandwidth,
+            atom_count_nearest_k=atom_count_nearest_k,
+            atom_count_generator=atom_count_generator,
+        )
+        atoms_per_molecule = self.add_fake_atom_capacity(
+            real_atoms_per_molecule,
+            mode=fake_atom_capacity_mode,
+            generator=atom_count_generator,
+        )
+        self.last_atom_count_diagnostics.update({
+            'real_count_mean': float(real_atoms_per_molecule.float().mean()),
+            'slot_count_mean': float(atoms_per_molecule.float().mean()),
+        })
+
+        if multilple_values_to_one_property is not None:
+            assert len(atoms_per_molecule) == len(multilple_values_to_one_property), \
+                f"{len(atoms_per_molecule)} != {len(multilple_values_to_one_property)}"
+
+        if kwargs.get("joint_decoding") is not None:
+            kwargs["joint_required_atoms"] = real_atoms_per_molecule.tolist()
+        return self.sample(atoms_per_molecule, 
+            n_timesteps=n_timesteps,
+            device=device,  
+            stochasticity=stochasticity, 
+            high_confidence_threshold=high_confidence_threshold,
+            xt_traj=xt_traj,
+            ep_traj=ep_traj,
+            normalization_file_path=normalization_file_path,
+            conditional_generation=conditional_generation,
+            property_name=property_name, # just for sampling process with normalizing 
+            properties_for_sampling=properties_for_sampling,
+            training_mode=training_mode,
+            properties_handle_method=properties_handle_method,
+            multilple_values_to_one_property=multilple_values_to_one_property,
+            guide_w=guide_w,
+            dfm_type=dfm_type,
+            guidance_format=guidance_format,
+            where_to_apply_guide=where_to_apply_guide,
+            categorical_temperature=categorical_temperature,
+            categorical_probability_mode=categorical_probability_mode,
+            collect_categorical_trace=collect_categorical_trace,
+            residual_mask_policy=residual_mask_policy,
+            dataset_name=dataset_name,
+            **kwargs)
+
+
+class CFGVectorField(CTMCVectorField):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unconditional_embedder = ZerosEmbedding(hidden_dim=self.property_embedding_dim)
+
+    def integrate_with_CFG_guidance(self, g: dgl.DGLGraph, node_batch_idx: torch.Tensor, 
+            upper_edge_mask: torch.Tensor, n_timesteps: int, 
+            guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0},
+            visualize=False,
+            dfm_type='campbell_rate_matrix',
+            stochasticity=8.0, 
+            high_confidence_threshold=0,
+            cat_temp_func=None,
+            forward_weight_func=None,
+            tspan=None,
+            normalization_file_path:str=None,
+            conditional_generation:bool=True,
+            property_name:str=None,
+            properties_for_sampling:int|float=None,
+            training_mode:bool=True,
+            properties_handle_method:str=None,
+            multilple_values_to_one_property: List[float|int] | None = None,
+            guidance_format: str = "linear",
+            where_to_apply_guide: str = "probabilities",
+            categorical_temperature: float | None = None,
+            categorical_probability_mode: str = "corrected",
+            collect_categorical_trace: bool = False,
+            dataset_name: str = "qm9",
+            **kwargs):
+
+        self.properties_for_sampling = properties_for_sampling
+        self.property_name = property_name
+        self.conditional_generation = conditional_generation
+        self.normalization_file_path = normalization_file_path
+        self.training_mode = training_mode
+        self.properties_handle_method = properties_handle_method
+        self.multilple_values_to_one_property = multilple_values_to_one_property
+        self.dataset_name = dataset_name
+
+        if stochasticity is None:
+            eta = self.eta
+        else:
+            eta = stochasticity
+
+        if high_confidence_threshold is None:
+            hc_thresh = self.hc_thresh
+        else:
+            hc_thresh = high_confidence_threshold
+
+        if cat_temp_func is None:
+            cat_temp_func = self.cat_temp_func
+        if forward_weight_func is None:
+            forward_weight_func = self.forward_weight_func        
+
+        # get edge_batch_idx
+        edge_batch_idx = get_edge_batch_idxs(g)
+
+        # get the timepoint for integration
+        if tspan is None:
+            t = torch.linspace(0, 1, n_timesteps, device=g.device)
+        else:
+            t = tspan             
+
+        # Get alpha values
+        alpha_t = self.interpolant_scheduler.alpha_t(t)
+        alpha_t_prime = self.interpolant_scheduler.alpha_t_prime(t)
+
+        # Initialize features
+        for feat in self.canonical_feat_order:
+            if feat == 'e':
+                data_src = g.edata
+            else:
+                data_src = g.ndata
+            data_src[f'{feat}_t'] = data_src[f'{feat}_0']
+
+        # Setup visualization if needed
+        if visualize:
+            traj_frames = {}
+            for feat in self.canonical_feat_order:
+                if feat == "e":
+                    data_src = g.edata
+                    split_sizes = g.batch_num_edges()
+                else:
+                    data_src = g.ndata
+                    split_sizes = g.batch_num_nodes()
+
+                split_sizes = split_sizes.detach().cpu().tolist()
+                init_frame = data_src[f'{feat}_0'].detach().cpu()
+                init_frame = torch.split(init_frame, split_sizes)
+                traj_frames[feat] = [init_frame]
+                traj_frames[f'{feat}_1_pred'] = []
+
+        # CFG branches receive different conditions and therefore must carry
+        # separate endpoint histories.
+        previous_unconditional_endpoint = None
+        previous_conditional_endpoint = None
+
+        # Integration loop
+        for s_idx in range(1, t.shape[0]):
+            s_i = t[s_idx]
+            t_i = t[s_idx - 1]
+            dt = s_i - t_i
+            last_step = (s_idx == t.shape[0] - 1)
+
+            (
+                g,
+                previous_unconditional_endpoint,
+                previous_conditional_endpoint,
+            ) = self.step_with_CFG_guidance(
+                                        g, s_i, t_i,
+                                        alpha_t[s_idx - 1], alpha_t[s_idx], alpha_t_prime[s_idx - 1],
+                                        node_batch_idx, edge_batch_idx, upper_edge_mask,
+                                        previous_unconditional_endpoint=previous_unconditional_endpoint,
+                                        previous_conditional_endpoint=previous_conditional_endpoint,
+                                        return_endpoints=True,
+                                        guide_w=guide_w,
+                                        cat_temp_func=cat_temp_func,
+                                        forward_weight_func=forward_weight_func,
+                                        dfm_type=dfm_type,
+                                        stochasticity=eta,
+                                        high_confidence_threshold=hc_thresh,
+                                        last_step=last_step,
+                                        normalization_file_path=normalization_file_path,
+                                        conditional_generation=conditional_generation,
+                                        property_name=property_name,
+                                        properties_for_sampling=properties_for_sampling,
+                                        training_mode=training_mode,
+                                        properties_handle_method=properties_handle_method,
+                                        multilple_values_to_one_property=multilple_values_to_one_property,
+                                        guidance_format=guidance_format,
+                                        where_to_apply_guide=where_to_apply_guide,
+                                        categorical_temperature=categorical_temperature,
+                                        categorical_probability_mode=categorical_probability_mode,
+                                        **kwargs)            
+
+            if visualize:
+                for feat in self.canonical_feat_order:
+                    if feat == "e":
+                        g_data_src = g.edata
+                        split_sizes = g.batch_num_edges()
+                    else:
+                        g_data_src = g.ndata
+                        split_sizes = g.batch_num_nodes()
+
+                    split_sizes = split_sizes.detach().cpu().tolist()
+                    frame = g_data_src[f'{feat}_t'].detach().cpu()
+                    frame = torch.split(frame, split_sizes)
+                    traj_frames[feat].append(frame)
+
+                    ep_frame = g_data_src[f'{feat}_1_pred'].detach().cpu()
+                    ep_frame = torch.split(ep_frame, split_sizes)
+                    traj_frames[f'{feat}_1_pred'].append(ep_frame)
+
+        # Set final values
+        for feat in self.canonical_feat_order:
+            if feat == "e":
+                g_data_src = g.edata
+            else:
+                g_data_src = g.ndata
+            g_data_src[f'{feat}_1'] = g_data_src[f'{feat}_t']
+
+        if visualize:
+            # Reshape trajectory frames
+            reshaped_traj_frames = []
+            for mol_idx in range(g.batch_size):
+                molecule_dict = {}
+                for feat in traj_frames.keys():
+                    feat_traj = []
+                    n_frames = len(traj_frames[feat])
+                    for frame_idx in range(n_frames):
+                        feat_traj.append(traj_frames[feat][frame_idx][mol_idx])
+                    molecule_dict[feat] = torch.stack(feat_traj)
+                reshaped_traj_frames.append(molecule_dict)
+
+            return g, reshaped_traj_frames
+
+        return g    
+
+    def step_with_CFG_guidance(self, g, s_i, t_i, alpha_t_i, alpha_s_i, alpha_t_prime_i,
+                        node_batch_idx, edge_batch_idx, upper_edge_mask,
+                        guide_w={'x': 2.0, 'a': 1.0, 'c': 1.0, 'e': 1.0},  # Different weights for each feature
+                        cat_temp_func=None,
+                        forward_weight_func=None,
+                        dfm_type='campbell_rate_matrix',
+                        stochasticity=8.0,
+                        high_confidence_threshold=0.9,
+                        last_step=False,
+                        normalization_file_path:str=None,
+                        conditional_generation:bool=True,
+                        property_name:str=None,
+                        properties_for_sampling:int|float=None,
+                        training_mode:bool=True,
+                        properties_handle_method:str=None,
+                        multilple_values_to_one_property: List[float|int] | None = None,
+                        guidance_format: str = "linear",  # 'linear' or 'log'
+                        where_to_apply_guide: str = "probabilities",  # 'probabilities' or 'rate_matrix'
+                        categorical_temperature: float | None = None,
+                        categorical_probability_mode: str = "corrected",
+                        previous_unconditional_endpoint: dict[str, torch.Tensor] | None = None,
+                        previous_conditional_endpoint: dict[str, torch.Tensor] | None = None,
+                        return_endpoints: bool = False,
+                        **kwargs):
+
+        # Get predictions from unconditional and conditional models
+
+        # Unconditional
+        uncond_emb = self.unconditional_embedder(g.batch_size, device=g.device)
+        t_batch = torch.full((g.batch_size,), t_i, device=g.device).unsqueeze(-1)
+        t_combined_uncond = torch.cat([t_batch, uncond_emb], dim=-1)
+        uncond_pred = self(g, t=t_combined_uncond,
+                    node_batch_idx=node_batch_idx,
+                    upper_edge_mask=upper_edge_mask,
+                    apply_softmax=False, # will do softmax later
+                    remove_com=True,
+                    previous_endpoint=previous_unconditional_endpoint)
+        
+        # the forward function in CTMCVectorField class of ctmc_vector_field.py will take care of conditional embeddings,
+        # it match case 2 of forward function adn will handle the conditional embeddings with the time t_i
+        cond_pred = self(g, t=torch.full((g.batch_size,), t_i, device=g.device),
+                                node_batch_idx=node_batch_idx,
+                                upper_edge_mask=upper_edge_mask,
+                                apply_softmax=False,
+                                remove_com=True,
+                                previous_endpoint=previous_conditional_endpoint)
+
+        next_unconditional_endpoint = self.prepare_self_conditioning_endpoint(
+            uncond_pred, categorical_are_logits=True
+        )
+        next_conditional_endpoint = self.prepare_self_conditioning_endpoint(
+            cond_pred, categorical_are_logits=True
+        )
+
+        dt = s_i - t_i
+
+        # Handle positions
+        x_1_cond = cond_pred['x']
+        x_1_uncond = uncond_pred['x']
+        x_t = g.ndata['x_t']
+        guide_w_pos = guide_w['x']
+        
+        vf_cond = self.vector_field(x_t, x_1_cond, alpha_t_i[0], alpha_t_prime_i[0])
+        vf_uncond = self.vector_field(x_t, x_1_uncond, alpha_t_i[0], alpha_t_prime_i[0])
+        vf = (1 - guide_w_pos) * vf_uncond + guide_w_pos * vf_cond
+        
+        g.ndata['x_t'] = x_t + dt * vf
+        g.ndata['x_1_pred'] = ((1 - guide_w_pos) * x_1_uncond + guide_w_pos * x_1_cond).detach().clone()
+       
+        # Handle categorical features
+        for feat_idx, feat in enumerate(self.canonical_feat_order):
+            if feat == 'x':
+                continue
+            
+            # Use the atom guidance scale for H-count unless an explicit h scale is supplied.
+            guide_weight = guide_w.get(feat, guide_w.get('a', 1.0))
+
+            if feat == 'e':
+                data_src = g.edata
+            else:
+                data_src = g.ndata
+            class_support_mask = self.get_category_support_mask(feat)
+
+            xt = data_src[f'{feat}_t'].argmax(-1)
+
+            if feat == 'e':
+                xt = xt[upper_edge_mask]
+
+            # Apply temperature
+            temperature = (
+                float(categorical_temperature)
+                if categorical_temperature is not None
+                else float(cat_temp_func(t_i))
+            )
+            if temperature <= 0.0:
+                raise ValueError("categorical temperature must be > 0")
+
+            if dfm_type == 'campbell':
+                # Get log probabilities
+                uncond_val = F.softmax(uncond_pred[feat], dim=-1)
+                cond_val = F.softmax(cond_pred[feat], dim=-1)
+                p_s_1 = combine_guided_endpoint_probabilities(
+                    uncond_val,
+                    cond_val,
+                    guide_weight,
+                    temperature=temperature,
+                    guidance_format=guidance_format,
+                    probability_mode=categorical_probability_mode,
+                )
+                if class_support_mask is not None:
+                    p_s_1 = p_s_1.masked_fill(
+                        ~class_support_mask.unsqueeze(0), 0.0
+                    )
+                    p_s_1 = p_s_1 / p_s_1.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1e-9)
+
+                xt, x_1_sampled = self.campbell_step(
+                    p_1_given_t=p_s_1,
+                    xt=xt,
+                    stochasticity=stochasticity,
+                    hc_thresh=high_confidence_threshold,
+                    alpha_t=alpha_t_i[feat_idx],
+                    alpha_t_prime=alpha_t_prime_i[feat_idx],
+                    dt=dt,
+                    batch_size=g.batch_size,
+                    batch_num_nodes=g.batch_num_edges()//2 if feat == 'e' else g.batch_num_nodes(),
+                    n_classes=self.n_cat_feats[feat]+1,
+                    mask_index=self.mask_idxs[feat],
+                    last_step=last_step,
+                    batch_idx=edge_batch_idx[upper_edge_mask] if feat == 'e' else node_batch_idx
+                )
+
+            elif dfm_type == 'campbell_rate_matrix':
+                uncond_val = uncond_pred[feat]
+                cond_val = cond_pred[feat]
+                if class_support_mask is not None:
+                    # Mask logits BEFORE softmax, so a very large forbidden
+                    # logit cannot underflow every supported probability.
+                    uncond_val = uncond_val.masked_fill(~class_support_mask, -torch.inf)
+                    cond_val = cond_val.masked_fill(~class_support_mask, -torch.inf)
+
+                if where_to_apply_guide == "probabilities":
+                    p_1_given_t_uncond = F.softmax(uncond_val, dim=-1)
+                    p_1_given_t_cond = F.softmax(cond_val, dim=-1)
+                elif where_to_apply_guide == "rate_matrix":
+                    p_1_given_t_uncond = F.softmax(uncond_val / temperature, dim=-1)
+                    p_1_given_t_cond = F.softmax(cond_val / temperature, dim=-1)
+
+                xt, x_1_sampled = CFGVectorField.campbell_step_with_rate_matrix_cfg(
+                    p_1_given_t_uncond=p_1_given_t_uncond,
+                    p_1_given_t_cond=p_1_given_t_cond,
+                    xt=xt,
+                    stochasticity=stochasticity,
+                    alpha_t=alpha_t_i[feat_idx],
+                    alpha_t_prime=alpha_t_prime_i[feat_idx],
+                    dt=dt,
+                    guide_weight=guide_weight,
+                    mask_index=self.mask_idxs[feat],
+                    n_classes=self.n_cat_feats[feat]+1,
+                    uncond_val=uncond_val,
+                    cond_val=cond_val,
+                    last_step=last_step,
+                    eps=1e-9,
+                    guidance_format=guidance_format,
+                    where_to_apply_guide=where_to_apply_guide,
+                    temperature=temperature,
+                    class_support_mask=class_support_mask,
+                )
+
+            if last_step:
+                # Save the actual endpoint distribution for optional FINAL MAP
+                # decoding. Never overwrite raw endpoint samples or the kernel.
+                if dfm_type == "campbell_rate_matrix":
+                    p_s_1, _ = guided_rate_endpoint(
+                        p_1_given_t_uncond, p_1_given_t_cond,
+                        guide_weight, temperature, guidance_format,
+                        where_to_apply_guide, class_support_mask,
+                    )
+                saved = p_s_1.detach()
+                if feat == "e":
+                    saved = saved.new_zeros(g.num_edges(), saved.shape[-1])
+                    saved[upper_edge_mask] = p_s_1.detach()
+                    saved[~upper_edge_mask] = p_s_1.detach()
+                data_src[f"{feat}_endpoint_probs"] = saved
+            # Handle edge features
+            if feat == 'e':
+                e_t = torch.zeros_like(g.edata['e_t'])
+                e_t[upper_edge_mask] = xt
+                e_t[~upper_edge_mask] = xt
+                xt = e_t
+
+                e_1_sampled = torch.zeros_like(g.edata['e_t'])
+                e_1_sampled[upper_edge_mask] = x_1_sampled
+                e_1_sampled[~upper_edge_mask] = x_1_sampled
+                x_1_sampled = e_1_sampled
+
+            data_src[f'{feat}_t'] = xt
+            data_src[f'{feat}_1_pred'] = x_1_sampled
+
+        if return_endpoints:
+            return (
+                g,
+                next_unconditional_endpoint,
+                next_conditional_endpoint,
+            )
+        return g
+    
+    @staticmethod 
+    def campbell_step_with_rate_matrix_cfg(p_1_given_t_uncond: torch.Tensor,
+                                        p_1_given_t_cond: torch.Tensor, 
+                                        xt: torch.Tensor,
+                                        stochasticity: float, 
+                                        alpha_t: float, 
+                                        alpha_t_prime: float, 
+                                        dt: float,
+                                        guide_weight: float,
+                                        mask_index: int,
+                                        n_classes: int,
+                                        uncond_val: torch.Tensor,
+                                        cond_val: torch.Tensor,
+                                        last_step: bool = False,
+                                        eps: float = 1e-9,
+                                        guidance_format: str = "linear",
+                                        where_to_apply_guide: str = "probabilities",
+                                        temperature: float = 1.0,
+                                        class_support_mask: torch.Tensor | None = None,
+                                        ): 
+        """Support-preserving CFG with a frozen-star CTMC exponential.
+
+        No entry-wise clipping of I+dt*Q, no spurious transitions from log(0),
+        and no argmax/temperature override at the last endpoint. The signature
+        keeps legacy logit arguments for caller/checkpoint compatibility.
+        """
+        if n_classes != mask_index + 1 or p_1_given_t_cond.shape[-1] != mask_index:
+            raise ValueError("mask must follow the real categorical vocabulary")
+        if class_support_mask is not None:
+            support = class_support_mask.to(device=xt.device, dtype=torch.bool)
+            if support.shape != (mask_index,) or not support.any():
+                raise ValueError("class support must select at least one real class")
+            scale = temperature if where_to_apply_guide == "rate_matrix" else 1.
+            p_1_given_t_uncond = F.softmax(uncond_val.masked_fill(~support, -torch.inf) / scale, -1)
+            p_1_given_t_cond = F.softmax(cond_val.masked_fill(~support, -torch.inf) / scale, -1)
+        endpoint, rate_multiplier = guided_rate_endpoint(
+            p_1_given_t_uncond, p_1_given_t_cond, guide_weight, temperature,
+            guidance_format, where_to_apply_guide, class_support_mask)
+        x1 = Categorical(endpoint).sample()
+        if last_step:
+            xt_new = torch.where(xt == mask_index, x1, xt)
+        else:
+            if not 0 <= float(alpha_t) < 1 or float(alpha_t_prime) < 0:
+                raise ValueError("nonterminal mask schedule must have 0<=alpha<1 and alpha_prime>=0")
+            factor = (alpha_t_prime + stochasticity * alpha_t) / (1 - alpha_t)
+            step_probs = frozen_mask_transition(
+                endpoint * rate_multiplier * factor, stochasticity, xt, dt)
+            xt_new = Categorical(step_probs).sample()
+        return (F.one_hot(xt_new, n_classes).float(),
+                F.one_hot(x1, n_classes).float())
+
+    @staticmethod # adapted from https://github.com/hnisonoff/discrete_guidance/blob/main/src/fm_utils.py
+    def _compute_rate_matrix(p_1_given_t: torch.Tensor, xt: torch.Tensor,
+                            alpha_t: float, alpha_t_prime: float, stochasticity: float,
+                            mask_index: int, n_classes: int) -> torch.Tensor:
+        """
+        Compute rate matrix R_t following the paper's approach
+        """
+        device = p_1_given_t.device
+        N = xt.shape[0] # N.shape = B * D, where B is batch size and D is number of nodes/edges
+        S_actual = p_1_given_t.shape[-1]  # Number of actual classes (S)
+
+        # Create full rate matrix for all S+1 classes
+        R_t = torch.zeros(N, n_classes, device=device)  # Shape: [N, S+1]
+
+        # Masks for current state
+        is_masked = (xt == mask_index).float().unsqueeze(-1)  # [N, 1]
+        is_unmasked = 1 - is_masked
+
+        # Unmasking rates: from mask to any non-mask state
+        # Rate = p(x1=j|xt) * (alpha_t_prime + stochasticity*alpha_t) / (1 - alpha_t)
+        unmasking_factor = (alpha_t_prime + stochasticity * alpha_t) / (1 - alpha_t + 1e-8)
+
+        # Only fill the actual class positions (0 to S-1), leave mask position (S) as 0
+        R_t[:, :S_actual] = is_masked * p_1_given_t * unmasking_factor
+
+        # Remasking rates: from actual classes to mask token
+        # For nodes that are currently unmasked, add rate to transition to mask
+        R_t[:, mask_index] = is_unmasked.squeeze(-1) * stochasticity
+
+        return R_t

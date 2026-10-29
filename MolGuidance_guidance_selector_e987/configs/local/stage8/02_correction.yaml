@@ -1,0 +1,19 @@
+_base_: 01a_kekule_augmentation.yaml
+training:
+  output_dir: ../runs/molguidance_stage8_02_correction
+wandb:
+  name: hp1kg-est-stage8-02-correction
+  save_dir: ../runs/molguidance_stage8_02_correction
+# Geometry-only auxiliary first. Visible categorical corruption is optional,
+# not mislabeled as the original CTMC kernel or the FlowMol3 implementation.
+mol_fm:
+  correction:
+    weight: 0.02
+    probability: 0.25
+    time: 0.85
+    node_rate: 0.0
+    edge_rate: 0.0
+    coordinate_std: 0.05
+    start_step: 200
+    warmup_steps: 400
+    max_loss_ratio: 0.1

@@ -1,0 +1,154 @@
+# Stage 6: Stage-5 fake atom count correction plus Megalodon-style
+# independent graph/geometry corruption time and an explicitly bond-first,
+# E(3)-equivariant coordinate residual. Reverse sampling follows the diagonal
+# t_x=t_graph path unless a future sampler explicitly supplies a 2-D path.
+checkpointing:
+  every_n_epochs: 1
+  monitor: val_total_loss
+  save_last: true
+  save_top_k: 3
+dataset:
+  atom_map: [B, C, N, O, F, Si, P, S, Cl, As, Se, Br]
+  conditioning:
+    enabled: true
+    normalize: true
+    property: est
+  dataset_name: qme14s
+  dataset_size: null
+  processed_data_dir: ../molguidance_hp1kg_baseline/data_est_joint_kekule_chemistry_official_xyz
+  use_joint_atom_state: true
+  n_atom_states: 38
+  n_bond_types: 4
+  require_chemistry_auxiliary_labels: true
+  use_hydrogen_counts: false
+  n_hydrogen_counts: 0
+  raw_data_dir: ../joint_kekule_diffusion/data_hp1kg_nevpt2_official_xyz
+  training_split: train
+  use_first_half_training_set: false
+guidance:
+  enabled: true
+  guidance_type: classifier_free_guidance
+  p_uncond: 0.1
+interpolant_scheduler:
+  cosine_params:
+    x: 1
+    s: 2
+    e: 1.5
+  schedule_type:
+    x: linear
+    s: linear
+    e: linear
+lr_scheduler:
+  base_lr: 0.0014
+  restart_interval: 0
+  restart_type: linear
+  warmup_length: 50.0
+  weight_decay: 1.0e-12
+model_setting:
+  gaussian_expansion:
+    enabled: false
+    n_gaussians: 5
+  properties_handle_method: concatenate_sum
+  property_embedding_dim: 256
+mol_fm:
+  self_conditioning_rate: 0.5
+  fake_atom_fraction: 0.3
+  fake_atom_std: 1.0
+  fake_atom_validation_seed: 17041
+  fake_atom_capacity_mode: stochastic
+  modality_time:
+    enabled: true
+    # Half the training cases expose clean atom/bond topology with independently
+    # corrupted coordinates; the other half uses independently sampled times.
+    graph_clean_probability: 0.5
+  chemistry_auxiliary:
+    edge_existence_weight: 0.5
+    valence_weight: 0.05
+    charge_weight: 0.05
+    connectivity_weight: 0.25
+    aromatic_weight: 0.2
+  atom_count_conditioning:
+    bandwidth: 0.15
+    mode: conditional_kernel
+    nearest_k: 128
+    reference_file: train_data_processed.pt
+  validation_config:
+    condition_shuffle: true
+    seed: 17041
+    time_grid: [0.05, 0.25, 0.5, 0.75, 0.95]
+    # Fixed off-diagonal pairs exercise both cross-modal directions and the
+    # clean-graph geometry branch deterministically.
+    graph_time_grid: [0.95, 0.75, 0.5, 1.0, 0.05]
+  parameterization: ctmc
+  n_atom_states: 38
+  joint_atom_state_metadata_file: joint_atom_state_metadata.json
+  n_bond_types: 4
+  n_hydrogen_counts: 0
+  prior_config:
+    x:
+      align: true
+      kwargs: {std: 1.0}
+      type: centered-normal
+    s:
+      align: false
+      kwargs: {}
+      type: ctmc
+    e:
+      align: false
+      kwargs: {}
+      type: ctmc
+  time_scaled_loss: true
+  total_loss_weights:
+    x: 3.0
+    s: 1.0
+    e: 2.0
+training:
+  # Requires expandable CUDA allocator segments on this B200 because complete
+  # graph sizes vary by batch. Batch 640 targets roughly 70% device memory;
+  # use scripts/train_stage6_b200.sh so the allocator contract is applied.
+  batch_size: 640
+  evaluation:
+    mols_to_sample: 32
+    sample_interval: 1.0
+    val_loss_interval: 1.0
+  max_num_edges: 900000.0
+  num_workers: 4
+  output_dir: ../runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first
+  trainer_args:
+    accelerator: gpu
+    accumulate_grad_batches: 1
+    devices: 1
+    gradient_clip_algorithm: value
+    gradient_clip_val: 1.0
+    limit_val_batches: 1.0
+    log_every_n_steps: 1
+    max_epochs: 2000
+    num_nodes: 1
+    precision: 32-true
+    strategy: auto
+vector_field:
+  convs_per_update: 1
+  high_confidence_threshold: 0.0
+  message_norm: 100
+  n_cp_feats: 4
+  n_hidden_edge_feats: 128
+  n_hidden_scalars: 256
+  n_message_gvps: 3
+  n_molecule_updates: 8
+  n_recycles: 1
+  n_update_gvps: 3
+  n_vec_channels: 16
+  rbf_dim: 32
+  rbf_dmax: 14
+  separate_mol_updaters: true
+  stochasticity: 10.0
+  self_conditioning: true
+  update_edge_w_distance: true
+  independent_modality_time: true
+  bond_first_geometry: true
+  bond_coordinate_scale: 0.1
+wandb:
+  mode: offline
+  name: hp1kg-est-cfg-joint-kekule-stage6-independent-time-bond-first
+  project: mol-fm
+  save_dir: ../runs/molguidance_hp1kg_joint_kekule_stage6_independent_time_bond_first

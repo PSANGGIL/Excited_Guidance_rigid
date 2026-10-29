@@ -1,0 +1,14 @@
+_base_: 02_feedback.yaml
+mol_fm:
+  chemistry_auxiliary:
+    # Replace the two expectation penalties; do not double-count them.
+    valence_weight: 0.0
+    charge_weight: 0.0
+    distribution_valence_weight: 0.02
+    distribution_charge_weight: 0.01
+    distribution_min_time: 0.7
+training:
+  output_dir: ../runs/molguidance_stage7_03_distribution
+wandb:
+  name: hp1kg-est-stage7-03-distribution
+  save_dir: ../runs/molguidance_stage7_03_distribution

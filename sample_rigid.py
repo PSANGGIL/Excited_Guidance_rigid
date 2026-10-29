@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Conditional reverse diffusion for data-derived rigid ring graphs."""
+from __future__ import annotations
+import argparse,json,math,random
+from pathlib import Path
+import torch,torch.nn.functional as F
+from polyring_diffusion.diffusion import LinearNoiseSchedule,center_coordinates,normalize_vectors
+from polyring_diffusion.model import RingDenoiser
+from polyring_diffusion.validity_scorer import feature_vector,load_property_scorer,load_validity_scorer
+
+def reveal(masked,step): return masked & (torch.rand(masked.shape,device=masked.device)<(1.0 if step==0 else 1.0/(step+1)))
+def guided(model,args,condition,scale,contribution=None):
+    cond=model(*args,condition)
+    if scale==1.0:return cond
+    drop=torch.ones(condition.shape[0],dtype=torch.bool,device=condition.device)
+    uncond=model(*args,torch.zeros_like(condition),drop)
+    if contribution is not None:
+      for key in ('center_noise','normal_noise','ring_logits','connection_logits','port_logits'):
+       delta=(cond[key].float()-uncond[key].float()).square().mean().sqrt().detach()
+       base=uncond[key].float().square().mean().sqrt().detach()
+       row=contribution.setdefault(key,{'calls':0,'delta_rms_sum':torch.zeros((),device=delta.device),'relative_rms_sum':torch.zeros((),device=delta.device)})
+       row['calls']+=1;row['delta_rms_sum']+=delta;row['relative_rms_sum']+=delta/base.clamp_min(1e-8)
+    return {k:(uncond[k]+scale*(cond[k]-uncond[k]) if k not in ('hidden','property_pred') else cond[k]) for k in cond}
+def compatible(sig1,p1,sig2,p2,kind):
+    a=(sig1[p1][0],sig1[p1][1]); b=(sig2[p2][0],sig2[p2][1])
+    if kind==3:return a==b
+    if kind==2:
+        an=(sig1[(p1+1)%len(sig1)][0],sig1[(p1+1)%len(sig1)][1]); bn=(sig2[(p2+1)%len(sig2)][0],sig2[(p2+1)%len(sig2)][1])
+        return (a==bn and an==b) or (a==b and an==bn)
+    return True
+
+def build_candidates(type_ids,conn_logits,port_logits,templates):
+    base=[];cl=F.log_softmax(conn_logits,-1).detach().cpu();pl=F.log_softmax(port_logits,-1).detach().cpu();sigs=[templates[i]['signature'] for i in type_ids]
+    for i in range(len(type_ids)):
+      for j in range(i+1,len(type_ids)):
+       for kind in (1,2,3):
+        for lp in range(len(sigs[i])):
+         for rp in range(len(sigs[j])):
+          if compatible(sigs[i],lp,sigs[j],rp,kind):
+           score=float(cl[i,j,kind]+pl[i,j,lp]+pl[j,i,rp]);base.append((score,i,j,kind,lp,rp))
+    return base
+
+def project(type_ids,conn_logits,port_logits,templates,max_extra=0,noise_scale=0.0,rng=None,cached_candidates=None):
+    n=len(type_ids);sigs=[templates[i]['signature'] for i in type_ids]
+    base=cached_candidates if cached_candidates is not None else build_candidates(type_ids,conn_logits,port_logits,templates)
+    candidates=[(score+(noise_scale*(-math.log(-math.log(max(rng.random(),1e-12)))) if noise_scale and rng is not None else 0.0),score,i,j,kind,lp,rp) for score,i,j,kind,lp,rp in base]
+    candidates.sort(reverse=True); parent=list(range(n)); used_atoms=set(); pairs=set(); selected=[]
+    def find(x):
+      while parent[x]!=x: parent[x]=parent[parent[x]]; x=parent[x]
+      return x
+    def consumed(c):
+      _,_,i,j,k,lp,rp=c
+      keys={(i,lp),(j,rp)}
+      if k==2: keys.update(((i,(lp+1)%len(sigs[i])),(j,(rp+1)%len(sigs[j]))))
+      return keys
+    def valid(c):
+      _,_,i,j,_,_,_=c
+      return (i,j) not in pairs and not bool(consumed(c)&used_atoms)
+    def add(c):
+      _,score,i,j,k,lp,rp=c; selected.append({'left':i,'right':j,'kind':['NONE','SINGLE','FUSED','SPIRO'][k],'left_port':lp,'right_port':rp,'score':score}); pairs.add((i,j)); used_atoms.update(consumed(c))
+    for c in candidates:
+      _,_,i,j,*_=c
+      if find(i)!=find(j) and valid(c): add(c); parent[find(j)]=find(i)
+    connected=len({find(i) for i in range(n)})==1
+    extra=0
+    if connected:
+      for c in candidates:
+       if extra>=max_extra:break
+       if valid(c):add(c);extra+=1
+    return selected,connected
+
+@torch.no_grad()
+def sample(checkpoint,targets,n_samples,num_rings,guidance,seed,output,connection_attempts=1,connection_noise=0.35,validity_dataset=None,validity_scorer=None,validity_weight=2.0,property_scorer=None,property_weight=0.0):
+    torch.manual_seed(seed); device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'); state=torch.load(checkpoint,map_location=device,weights_only=False); cfg=state['config']; features=state['template_features']
+    mc=dict(cfg['model']); mc.update(num_templates=features.shape[0],template_features=features.tolist()); model=RingDenoiser(**mc).to(device);model.load_state_dict(state['model']);model.eval(); schedule=LinearNoiseSchedule(**cfg['diffusion']).to(device)
+    templates=sorted(state['manifest']['templates'],key=lambda x:x['id']);records=[];label_rows=[];condition_contribution={}
+    scorer_bundle=load_validity_scorer(validity_scorer) if validity_scorer else None;property_bundle=load_property_scorer(property_scorer) if property_scorer else None
+    transform=state['manifest']['splits'][0].get('target_transform','log10') if False else 'log10'; epsilon=1e-6
+    for target in targets:
+      torch.manual_seed(seed)
+      normalized=(math.log10(target+epsilon)-float(state['property_mean']))/float(state['property_std']); condition=torch.full((n_samples,1),normalized,device=device)
+      mask=torch.ones((n_samples,num_rings),dtype=torch.bool,device=device); rt=torch.full((n_samples,num_rings),model.ring_mask_token,dtype=torch.long,device=device)
+      pair=mask[:,:,None]&mask[:,None,:]; pair&=~torch.eye(num_rings,dtype=torch.bool,device=device)[None]; ct=torch.zeros((n_samples,num_rings,num_rings),dtype=torch.long,device=device);ct[pair]=model.connection_mask_token
+      centers=center_coordinates(torch.randn(n_samples,num_rings,3,device=device),mask);normals=normalize_vectors(torch.randn(n_samples,num_rings,3,device=device),mask)
+      for step in reversed(range(schedule.timesteps)):
+        t=torch.full((n_samples,),step,dtype=torch.long,device=device); pred=guided(model,(rt,centers,normals,ct,mask,t),condition,guidance,condition_contribution)
+        centers=center_coordinates(schedule.p_step(centers,pred['center_noise'],t),mask);normals=normalize_vectors(schedule.p_step(normals,pred['normal_noise'],t),mask)
+        rs=torch.distributions.Categorical(logits=pred['ring_logits']).sample();rt=torch.where(reveal(rt==model.ring_mask_token,step),rs,rt)
+        upper=pair&torch.triu(torch.ones(num_rings,num_rings,dtype=torch.bool,device=device),1)[None];cs=torch.distributions.Categorical(logits=pred['connection_logits']).sample();rv=reveal((ct==model.connection_mask_token)&upper,step);ct=torch.where(rv,cs,ct);ct=torch.where(upper,ct,ct.transpose(1,2));ct[:,torch.arange(num_rings),torch.arange(num_rings)]=0
+      pred=guided(model,(rt,centers,normals,ct,mask,torch.zeros(n_samples,dtype=torch.long,device=device)),condition,guidance,condition_contribution)
+      for b in range(n_samples):
+        ids=rt[b].tolist();rings=[{'template_id':tid,'signature':templates[tid]['signature'],'center':centers[b,i].tolist(),'normal':normals[b,i].tolist()} for i,tid in enumerate(ids)]
+        rng=random.Random(seed+int(round(target*1000003))+b*10007);best=None;tested=0;valid_count=0
+        cached=build_candidates(ids,pred['connection_logits'][b],pred['port_logits'][b],templates)
+        if connection_attempts>1:
+          from rdkit import RDLogger
+          from export_rigid_sdf import decode
+          RDLogger.DisableLog('rdApp.*')
+        options=[]
+        for attempt in range(max(1,connection_attempts)):
+          noise=0.0 if attempt==0 else connection_noise
+          edges,connected=project(ids,pred['connection_logits'][b],pred['port_logits'][b],templates,noise_scale=noise,rng=rng,cached_candidates=cached)
+          rec={'target_f_osc':target,'normalized_condition':normalized,'connected':connected,'rings':rings,'connections':edges}
+          score=sum(e['score'] for e in edges);is_valid=False
+          if connection_attempts>1 and connected:
+           tested+=1
+           try:decode(rec,seed,embed=False);is_valid=True;valid_count+=1
+           except Exception:pass
+          features=feature_vector(rec);options.append([is_valid,score,rec,attempt,features,0.0,score,None,0.0])
+          if validity_dataset is not None:label_rows.append({'features':features,'valid':int(is_valid),'target_f_osc':target,'conditional_score':score,'attempt':attempt})
+        if scorer_bundle:
+          scorer,mean,std,_=scorer_bundle
+          fx=torch.tensor([o[4] for o in options]);probs=scorer((fx-mean)/std).sigmoid().tolist()
+          for o,prob in zip(options,probs):o[5]=prob;o[6]=o[1]+validity_weight*math.log(max(prob,1e-8))
+        if property_bundle and property_weight:
+          property_model,property_mean,property_std,_=property_bundle
+          property_features=torch.tensor([([0.0]+o[4][1:]) for o in options])
+          predicted=property_model((property_features-property_mean)/property_std).tolist()
+          target_log=math.log10(target+epsilon)
+          for o,value in zip(options,predicted):o[7]=value;o[8]=-abs(value-target_log);o[6]+=property_weight*o[8]
+        valid_options=[o for o in options if o[0]];best=max(valid_options or options,key=lambda o:o[6])
+        rec=best[2];rec['connection_search']={'decoder':'sequential_constrained_tree','attempts_requested':max(1,connection_attempts),'candidates_tested':tested,'valid_candidates':valid_count,'selected_attempt':best[3],'selected_valid':best[0],'conditional_score':best[1],'validity_probability':best[5],'predicted_log10_f_osc':best[7],'property_reward':best[8],'joint_reward':best[6]}
+        records.append(rec)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    with output.open('w') as f:
+      for r in records:f.write(json.dumps(r)+'\n')
+    summary={}
+    for target in targets:
+      subset=[r for r in records if r['target_f_osc']==target]; tf={};cf={}
+      for r in subset:
+       for ring in r['rings']:tf[str(ring['template_id'])]=tf.get(str(ring['template_id']),0)+1
+       for e in r['connections']:cf[e['kind']]=cf.get(e['kind'],0)+1
+      summary[str(target)]={'samples':len(subset),'connected':sum(r['connected'] for r in subset),'template_counts':tf,'connection_counts':cf}
+    if condition_contribution:
+      summary['_condition_contribution']={k:{'calls':v['calls'],'mean_delta_rms':float(v['delta_rms_sum'].cpu()/v['calls']),'mean_relative_rms':float(v['relative_rms_sum'].cpu()/v['calls'])} for k,v in condition_contribution.items()}
+    output.with_suffix('.summary.json').write_text(json.dumps(summary,indent=2))
+    if validity_dataset is not None:
+      validity_dataset.parent.mkdir(parents=True,exist_ok=True)
+      with validity_dataset.open('w') as f:
+       for row in label_rows:f.write(json.dumps(row)+'\n')
+    print(json.dumps(summary,indent=2))
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--checkpoint',default='runs/rigid_100k/best.pt');p.add_argument('--targets',type=float,nargs='+',default=[0.1,0.5,1.0,1.5,2.0]);p.add_argument('--n-samples',type=int,default=32);p.add_argument('--num-rings',type=int,default=13);p.add_argument('--guidance',type=float,default=1.5);p.add_argument('--seed',type=int,default=123);p.add_argument('--connection-attempts',type=int,default=1);p.add_argument('--connection-noise',type=float,default=.35);p.add_argument('--validity-dataset',type=Path);p.add_argument('--validity-scorer',type=Path);p.add_argument('--validity-weight',type=float,default=2.0);p.add_argument('--property-scorer',type=Path);p.add_argument('--property-weight',type=float,default=0.0);p.add_argument('--output',type=Path,default=Path('samples/rigid_100k.jsonl'));a=p.parse_args();sample(a.checkpoint,a.targets,a.n_samples,a.num_rings,a.guidance,a.seed,a.output,a.connection_attempts,a.connection_noise,a.validity_dataset,a.validity_scorer,a.validity_weight,a.property_scorer,a.property_weight)
+if __name__=='__main__':main()

@@ -1,0 +1,10 @@
+{
+  "seen": 133704,
+  "parsed": 131731,
+  "selected": 13560,
+  "roundtrip_exact": 13560,
+  "junction_valid": 13560,
+  "oracle_scaffold_exact": 13560,
+  "success_rate": 1.0,
+  "failures": []
+}

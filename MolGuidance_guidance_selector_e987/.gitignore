@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.conda_cache/
+.pytest_cache/
+lightning_logs/
+runs/
+wandb/

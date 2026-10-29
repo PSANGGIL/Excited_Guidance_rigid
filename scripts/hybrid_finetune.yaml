@@ -1,0 +1,47 @@
+seed: 47
+device: cuda:0
+data:
+  root: data_ring_rigid
+diffusion:
+  timesteps: 200
+  beta_start: 0.0001
+  beta_end: 0.02
+model:
+  hidden_dim: 192
+  num_layers: 6
+  time_dim: 64
+  max_ports: 8
+  condition_dim: 1
+  condition_dropout: 0.2
+  property_head: true
+  atom_hidden_dim: 192
+  atom_layers: 4
+  max_free_atoms: 32
+training:
+  batch_size: 256
+  num_workers: 0
+  epochs: 500
+  learning_rate: 5.0e-06
+  weight_decay: 1.0e-06
+  grad_clip: 1.0
+  bf16: true
+  connection_class_weights: [0.05, 1.0, 1.0, 1.0]
+  loss_weights:
+    center: 1.0
+    normal: 0.25
+    ring: 1.0
+    connection: 1.0
+    port: 0.5
+    property: 0.5
+    valence: 0.5
+    kekule: 0.5
+    port_validity: 0.3
+    atom_coordinate: 1.0
+    atom_type: 1.0
+    atom_charge: 0.25
+    atom_bond: 1.0
+    attachment: 1.0
+    attachment_port: 0.5
+    atom_count: 0.5
+  validation_batches: 10
+  output_dir: runs/hybrid_ring_atom

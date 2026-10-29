@@ -1,0 +1,10 @@
+_base_: 04_correction.yaml
+# Isolate training-time condition injection; keep inference CFG=1 for comparison.
+# This scale is not a measured condition contribution percentage.
+vector_field:
+  condition_residual_scale: 0.5
+training:
+  output_dir: ../runs/molguidance_stage7_08_condition_scale_control
+wandb:
+  name: hp1kg-est-stage7-08-condition-scale-control
+  save_dir: ../runs/molguidance_stage7_08_condition_scale_control

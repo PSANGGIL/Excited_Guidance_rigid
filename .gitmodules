@@ -1,0 +1,3 @@
+[submodule "MolGuidance_official"]
+	path = MolGuidance_official
+	url = https://github.com/Liu-Group-UF/MolGuidance.git

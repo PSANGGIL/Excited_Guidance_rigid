@@ -1,0 +1,22 @@
+{
+  "started_utc": "2026-10-29T06:50:20.223565+00:00",
+  "finished_utc": "2026-10-29T06:50:58.778363+00:00",
+  "command": [
+    "/home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "MolGuidance_guidance_selector_e987/tests",
+    "-v"
+  ],
+  "environment": {
+    "PYTHONPATH": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid:/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/MolGuidance_guidance_selector_e987",
+    "CUDA_VISIBLE_DEVICES": "",
+    "OMP_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2",
+    "OPENBLAS_NUM_THREADS": "2"
+  },
+  "returncode": 0,
+  "log": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/stage8_commit_validation_20261029/unittest.log"
+}

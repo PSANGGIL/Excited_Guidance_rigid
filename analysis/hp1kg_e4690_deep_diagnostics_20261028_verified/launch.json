@@ -1,0 +1,12 @@
+{
+  "pid": 2494063,
+  "detached": true,
+  "command": [
+    "/home/jovyan/cpu-only-1-datavol-1/mg_b200/bin/python",
+    "-u",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/deep_hp1kg_e4690_20261028.py",
+    "--worker",
+    "--output",
+    "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_deep_diagnostics_20261028_verified"
+  ]
+}

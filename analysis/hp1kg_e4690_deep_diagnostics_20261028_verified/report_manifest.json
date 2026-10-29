@@ -1,0 +1,8 @@
+{
+  "created_utc": "2026-10-28T03:23:28.553042+00:00",
+  "report": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_deep_diagnostics_20261028_verified/detailed_report_ko.txt",
+  "html": "/home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_deep_diagnostics_20261028_verified/detailed_report_ko.html",
+  "script_sha256": "3740cdee59ee9be4d4bb0f51c4be70ddd8006c8a875c69405051c555dc35152a",
+  "lines": 171,
+  "summary_sha256": "95d4d7ef8656c8e4693b5a9ef46649e3bb9309b18fb2f35ffe57b4deed139938"
+}

@@ -140,3 +140,56 @@ src/polyring_diffusion/
 5. Only after base validity is established, compare conditional training, best-of-N, late-stage surrogate reward, and SMC/RL fine-tuning.
 
 Keeping RDKit/xTB out of the differentiable inner loop is intentional. Tensor-level port, topology, radius-overlap, and valence-like penalties can train on GPU; exact RDKit and xTB checks belong in preprocessing, asynchronous evaluation, or a sparse late-stage reward pipeline.
+
+## Real 100k rigid-ring database and conditional training
+
+The repository also contains a reproducible path for the first 100,000 molecules
+from `dataset_train.csv`. The existing atom-level Kekule splits are converted
+without recomputing their ETKDGv3 coordinates:
+
+```bash
+PYTHONPATH=.deps python prepare_rigid_dataset.py \
+  --source-dir /home/jovyan/cpu-only-1-datavol-1/psg/generation/STGG-AL/data/data_kekule \
+  --output-dir data_ring_rigid --shard-size 2000
+PYTHONPATH=.deps:src python verify_rigid_dataset.py \
+  --root data_ring_rigid \
+  --csv /home/jovyan/cpu-only-1-datavol-1/psg/generation/STGG-AL/data/dataset_train.csv
+```
+
+The database keeps the complete atom graph and adds canonical data-derived ring
+templates, ring centers/normals/radii, atom-ring membership, connection classes,
+and indexed ports. It is therefore lossless with respect to non-ring substituents.
+The current dataset discovers 48 ring templates rather than using the seven smoke
+templates.
+
+Train the `f_osc`-conditioned ring model and sample it with:
+
+```bash
+PYTHONPATH=.deps:src python train_rigid.py --config scripts/real.yaml
+PYTHONPATH=.deps:src python sample_rigid.py \
+  --checkpoint runs/rigid_100k/best.pt --targets 0.1 0.8 3.0
+```
+
+`properties` uses the source preprocessing contract `log10(f_osc + 1e-6)` and is
+standardized using train-split statistics. Generated JSONL records are projected
+connected ring graphs. They are not an independent quantum-chemical validation
+that the requested oscillator strength was achieved.
+
+
+## Current QCDGE model variants
+
+The repository now contains two distinct QCDGE generation paths:
+
+- `train_hybrid.py` / `sample_hybrid.py`: the trained rigid-ring-template plus
+  free-heavy-atom baseline. It jointly diffuses ring geometry/topology and
+  non-ring heavy atoms, and supports spectrum conditioning with classifier-free
+  guidance and condition-response diagnostics.
+- `train_fpa_template_free.py` / `sample_fpa_template_free.py`: the next
+  template-free FPA model. Every heavy atom remains explicit while 3--10 member
+  rings are represented by auxiliary geometric cells carrying exact atom
+  membership. Ring chemistry is stored on member atoms rather than in a finite
+  ring-template vocabulary.
+
+The full representation, objectives, checkpoint contract, validation results,
+and current limitations are documented in
+[`docs/template_free_fpa_model.md`](docs/template_free_fpa_model.md).

@@ -3,11 +3,14 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.deps/
+.conda_cache/
 dist/
 build/
 *.egg-info/
 runs/
 samples/
+data_ring_rigid/
 *.pt
 *.ckpt
 

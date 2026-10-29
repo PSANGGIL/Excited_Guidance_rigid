@@ -1,0 +1,11 @@
+
+이전 설명의 정정
+#830의 O−O 결합 지적은 잘못이었다. 원본 SDF의 O 세 개는 C와 결합하며 O−O edge는 없다. 분자식 C47H30O3.
+#189의 [N+](=O)[O−]는 nitro 표기다. net charge=0, radical=0이며 원자 형식전하만으로 비정상이라 판단할 수 없다.
+기존 방향족 평면성 검사는 모든 원자가 aromatic인 고리를 포함했다. 이번 지표는 고리 전체 결합이 aromatic인 경우에만 적용한다.
+최적화 후 RMS plane>0.15 Å 경고: 102 → 89개. 판정 변경 13개.
+계산 성공 452개 중 입력 geometry 통과: 기존 364, 같은 결합 기준 재평가 373개.
+이는 평가 정의의 수정이며 모델 성능 개선이 아니다. 기존 모델·생성기·원본 산출물은 수정하지 않았다.
+
+최신 재분석 보고서: /home/jovyan/cpu-only-1-datavol-1/psg/generation/Excited_Guidance_rigid/analysis/hp1kg_e4690_result_reanalysis_20261029/reanalysis_report_ko.txt
+기존 시점의 보고서는 이력 보존을 위해 그대로 두었습니다. 위 정정이 우선합니다.
